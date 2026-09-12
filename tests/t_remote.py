@@ -588,6 +588,43 @@ def test_cli_remote_refuses_undeclared_host() -> None:
         check("Traceback" not in text, "no traceback for an expected refusal")
 
 
+def test_cli_remote_run_absorbs_connection_flags_after_host() -> None:
+    with remote_repo() as root:
+        remote.declare_target("vulnbox", label="lab", ack_policy=True, root=root)
+        with fake_ssh() as fake:
+            fake.route("CTFCTL_VERSION", 0, remote.toolkit_fingerprint(root) + "\n")
+            fake.route("command -v python3", 0, "/usr/bin/python3\n")
+            fake.route("ctfctl doctor", 0, '{"ok": true}')
+            out = io.StringIO()
+            with redirect_stdout(out):
+                code = cli.main(
+                    [
+                        "remote",
+                        "run",
+                        "vulnbox",
+                        "--user",
+                        "ops",
+                        "--port",
+                        "2222",
+                        "doctor",
+                        "--json",
+                    ]
+                )
+        check_eq(code, 0, "flags after the host must be absorbed, not proxied")
+        check_in('{"ok": true}', out.getvalue(), "stdout must be streamed")
+        doctor_calls = [c for c in fake.calls if "ctfctl doctor" in c["argv"][-1]]
+        check(doctor_calls, "doctor must have been proxied")
+        check_in("ops@vulnbox", doctor_calls[0]["argv"], "the absorbed user must apply")
+        check(
+            "--user" not in doctor_calls[0]["argv"][-1],
+            "connection flags must not be proxied to the remote subcommand",
+        )
+        err = io.StringIO()
+        with redirect_stderr(err):
+            code2 = cli.main(["remote", "run", "vulnbox", "--port", "abc", "doctor"])
+        check_eq(code2, 2, "a non-numeric port is a usage error")
+
+
 def test_cli_targets_declare_round_trip() -> None:
     with remote_repo() as root:
         out = io.StringIO()

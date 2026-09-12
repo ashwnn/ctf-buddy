@@ -50,9 +50,10 @@ def validate_path(path: str) -> str:
     """Refuse anything that is not a clean absolute path.
 
     Absolute-only is what makes a path safe to send to a remote host: a relative
-    path would silently resolve against a cwd the operator cannot see. Both
-    POSIX (/var/www) and native Windows (E:\\www) absolute forms are accepted so
-    the same exploration code works on the operator laptop.
+    path would silently resolve against a cwd the operator cannot see. POSIX
+    paths (/var/www) are absolute on every platform, including Windows, where
+    `os.path.isabs` alone would wrongly reject them; native absolute paths
+    (E:\\www) are accepted for local exploration.
     """
     if not path:
         raise FilesError(
@@ -62,7 +63,8 @@ def validate_path(path: str) -> str:
         raise FilesError("path contains a NUL byte")
     if len(path) > MAX_PATH:
         raise FilesError(f"path is longer than {MAX_PATH} characters")
-    if not os.path.isabs(path):
+    posix_absolute = path.startswith("/")
+    if not posix_absolute and not os.path.isabs(path):
         raise FilesError(
             f"only absolute paths are accepted, got {path!r}",
             hint="start at / on the target (e.g. /var/www); relative paths would "
@@ -70,6 +72,10 @@ def validate_path(path: str) -> str:
         )
     if any(part == ".." for part in re.split(r"[\\/]", path)):
         raise FilesError(f"path must not contain '..': {path!r}")
+    if posix_absolute:
+        # Keep POSIX paths verbatim: os.path.normpath on Windows would rewrite
+        # the separators and hand the remote host a path it cannot use.
+        return path
     return os.path.normpath(path)
 
 

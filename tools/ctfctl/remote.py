@@ -876,12 +876,14 @@ def render_plan(entry: Dict[str, Any], *, verbose: bool = False) -> str:
     authorization = entry.get("authorization") or {}
     detection = entry.get("detection") or {}
     facts = detection.get("facts") or {}
+    fingerprint = entry.get("host_fingerprint") or {}
     lines = [
         f"plan        {entry.get('plan_id', '?')}",
         f"profile     {entry.get('profile', '?')} "
         f"(support={entry.get('profile_support_level', '?')})",
         f"created     {entry.get('created_at', '?')}",
-        f"host        {detection.get('os_id', '?')} / {detection.get('init', '?')}",
+        f"host        {fingerprint.get('os_id') or '?'} / "
+        f"{fingerprint.get('init_system') or '?'}",
         f"authorized  {authorization.get('scope', '?')} "
         f"allows_mutation={authorization.get('allows_mutation')}",
         f"policy      acknowledged={authorization.get('policy_acknowledged')}",

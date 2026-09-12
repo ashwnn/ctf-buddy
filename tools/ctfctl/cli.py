@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import sys
 from typing import Any, Dict, List, Optional
 
@@ -829,6 +830,59 @@ def cmd_files(args: argparse.Namespace) -> int:
     raise util.UsageError(f"unknown files action {command!r}")
 
 
+def _absorb_run_connection_options(args: argparse.Namespace) -> List[str]:
+    """Move connection flags that argparse left in REMAINDER back onto args.
+
+    `remote run <host> --user root doctor` is the natural order, but REMAINDER
+    captures everything after the host. Absorbing the known flags here means
+    both orders work and the proxied subcommand never sees them.
+    """
+    tail = list(getattr(args, "args", []) or [])
+    consumed = 0
+    while consumed < len(tail) and tail[consumed] in (
+        "--user",
+        "--port",
+        "--identity",
+        "--timeout",
+    ):
+        flag = tail[consumed]
+        if consumed + 1 >= len(tail):
+            raise util.UsageError(f"{flag} needs a value")
+        value = tail[consumed + 1]
+        if flag == "--user":
+            args.user = value
+        elif flag == "--identity":
+            args.identity = value
+        elif flag == "--port":
+            try:
+                args.port = int(value)
+            except ValueError:
+                raise util.UsageError(
+                    f"--port must be a number, got {value!r}"
+                ) from None
+        elif flag == "--timeout":
+            try:
+                args.timeout = float(value)
+            except ValueError:
+                raise util.UsageError(
+                    f"--timeout must be a number, got {value!r}"
+                ) from None
+        consumed += 2
+    return tail[consumed:]
+
+
+def _remote_command_prefix(args: argparse.Namespace, subcommand: str) -> str:
+    """A copy-pasteable command prefix matching the connection options in use."""
+    parts = ["ctfctl", "remote", subcommand]
+    if getattr(args, "user", ""):
+        parts += ["--user", shlex.quote(args.user)]
+    if getattr(args, "port", None):
+        parts += ["--port", str(args.port)]
+    if getattr(args, "identity", ""):
+        parts += ["--identity", shlex.quote(args.identity)]
+    return " ".join(parts)
+
+
 def _remote_conn(args: argparse.Namespace) -> remote_mod.Conn:
     conn = remote_mod.parse_host(
         args.host,
@@ -849,6 +903,8 @@ def cmd_remote(args: argparse.Namespace) -> int:
             "remote needs a subcommand",
             hint="try: ctfctl remote probe <host>",
         )
+    if command == "run":
+        args.args = _absorb_run_connection_options(args)
     conn = _remote_conn(args)
     if command == "probe":
         payload = remote_mod.probe(conn, save=args.save, keep_raw=args.keep_raw)
@@ -896,6 +952,13 @@ def cmd_remote(args: argparse.Namespace) -> int:
             for entry in matched:
                 print()
                 print(remote_mod.render_plan(entry, verbose=args.verbose))
+                plan_id = entry.get("plan_id", "latest")
+                prefix = _remote_command_prefix(args, "apply")
+                verify_prefix = _remote_command_prefix(args, "verify")
+                print(
+                    f"\nnext: {prefix} {conn.target} --plan {plan_id} --yes"
+                    f"\n      {verify_prefix} {conn.target} --plan {plan_id}"
+                )
         return util.EXIT_OK if matched else util.EXIT_NEGATIVE
     if command == "apply":
         code, payload = remote_mod.apply(
@@ -945,6 +1008,8 @@ def cmd_remote(args: argparse.Namespace) -> int:
                     f"{item.get('tx_id', '?')}  phase={item.get('phase', '?')}  "
                     f"files={len(item.get('files') or [])}"
                 )
+            if not transactions and "error" not in payload:
+                print("no remote transactions recorded")
             if payload.get("rolled_back"):
                 print("rolled back")
         return code

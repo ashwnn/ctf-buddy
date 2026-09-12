@@ -40,6 +40,24 @@ def test_list_dir_refuses_relative_path_and_traversal() -> None:
         raise Failure(f"list_dir must refuse non-absolute path {bad!r}")
 
 
+def test_validate_path_keeps_posix_paths_verbatim() -> None:
+    # Windows reports os.path.isabs("/etc") as False; remote paths must still
+    # pass, and must not be rewritten with backslashes.
+    for path in ("/etc", "/var/www", "/opt/app/app.py"):
+        check_eq(
+            files_mod.validate_path(path),
+            path,
+            f"POSIX absolute path must pass verbatim: {path}",
+        )
+    resolved = files_mod.resolve_local_path("kb")
+    check(
+        os.path.isabs(resolved), "local relative path must resolve to an absolute path"
+    )
+    check_eq(
+        files_mod.validate_path(resolved), resolved, "resolved local path must validate"
+    )
+
+
 def test_find_files_respects_glob_and_depth() -> None:
     with temp_dir() as root:
         _write(os.path.join(root, "a.py"))
