@@ -95,6 +95,32 @@ def _latest_committed_tx() -> Optional[str]:
     return None
 
 
+def _ensure_vulnerable(directory: str, port: int, exploit_path: str,
+                       health_path: str) -> None:
+    """Guarantee the fixture is in its canonical vulnerable state.
+
+    A previous run of this test (or a manual drill) may have left the fixture
+    patched. Rather than depending on the operator to run reset.sh, restore the
+    tracked source and restart the service, so the integration test is
+    repeatable.
+    """
+    if _exploit_reaches_canary(port, exploit_path):
+        return
+    if util.which("git"):
+        _run(["git", "restore", "--source=HEAD", "--staged", "--worktree", "--",
+              os.path.relpath(directory, REPO_ROOT)], timeout=60)
+        _run(_compose(directory) + ["restart"], timeout=180)
+        deadline = time.time() + 90
+        while time.time() < deadline:
+            if _http_code(f"http://127.0.0.1:{port}{health_path}") == 200 and \
+                    _exploit_reaches_canary(port, exploit_path):
+                return
+            time.sleep(3)
+    check(_exploit_reaches_canary(port, exploit_path),
+          f"fixture at {directory} is not in its vulnerable state; run "
+          f"fixtures/{os.path.basename(directory)}/reset.sh")
+
+
 def _exploit_reaches_canary(port: int, path: str) -> bool:
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5) as response:
@@ -110,9 +136,7 @@ def _exploit_reaches_canary(port: int, path: str) -> bool:
 def test_p1_discover_plan_apply_rollback() -> None:
     _ensure_fixture(P1, P1_PORT, "/healthz")
     exploit_path = "/files?name=../../canary.txt"
-
-    check(_exploit_reaches_canary(P1_PORT, exploit_path),
-          "the fixture must be vulnerable before the test starts (run reset.sh if not)")
+    _ensure_vulnerable(P1, P1_PORT, exploit_path, "/healthz")
 
     code, out, err = run_cli(["discover", "--save", "--json"])
     check_eq(code, 0, f"discover failed: {err}")
@@ -154,8 +178,7 @@ def test_p1_discover_plan_apply_rollback() -> None:
 def test_p2_discover_plan_apply_rollback() -> None:
     _ensure_fixture(P2, P2_PORT, "/api.php?action=healthz")
     exploit_path = "/download.php?file=../../canary.txt"
-    check(_exploit_reaches_canary(P2_PORT, exploit_path),
-          "the php fixture must be vulnerable before the test starts")
+    _ensure_vulnerable(P2, P2_PORT, exploit_path, "/api.php?action=healthz")
 
     run_cli(["discover", "--save", "--json"])
     code, out, err = run_cli(["plan", "--profile", "web-php-apache-compose", "--json"])
