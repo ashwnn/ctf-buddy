@@ -1,0 +1,185 @@
+{
+  "schema": "ctfctl.profile/1",
+  "profile_id": "web-php-apache-compose",
+  "title": "PHP/Apache service in one Compose project with a file-download route",
+  "scope": "compose-project",
+  "support_level": "tested-auto",
+  "requires": ["docker", "docker compose"],
+  "notes": [
+    "Container scope only: nothing outside the Compose project directory is modified.",
+    "The patch inserts one realpath()-based containment guard immediately before the filesystem read. It does not rewrite the route, the response headers or the storage layout.",
+    "Candidate syntax is validated with `php -l` inside the running service container, reading the candidate from stdin."
+  ],
+  "detect": {
+    "all": [
+      {
+        "predicate": "container_running",
+        "args": {"name_regex": "(^|-)web$", "image_regex": "php"}
+      },
+      {
+        "predicate": "listener_present",
+        "args": {"published": true}
+      },
+      {
+        "predicate": "file_exists",
+        "args": {"path_glob": "service/public/download.php"}
+      }
+    ],
+    "any": [
+      {"predicate": "container_running", "args": {"compose_service_regex": "web|app|www"}},
+      {"predicate": "listener_present", "args": {"process_regex": "apache2|httpd|php-fpm"}}
+    ]
+  },
+  "facts": {
+    "compose_project": {"resolver": "compose_project"},
+    "compose_service": {"resolver": "compose_service"},
+    "container_name": {"resolver": "container_name"},
+    "compose_file": {"resolver": "compose_file"},
+    "project_dir": {"resolver": "project_dir"},
+    "host_port": {"resolver": "host_port"},
+    "php_file": {"resolver": "path_in_project_dir", "relative": "service/public/download.php"}
+  },
+  "actions": {
+    "patch_download_traversal": {
+      "action_id": "file.php_canonicalize_path_use",
+      "eligibility": "auto",
+      "description": "Insert a realpath() containment guard before the file_get_contents() call.",
+      "params": {
+        "path": "{php_file}",
+        "root_expr": "'/srv/app/files'",
+        "guard_var": "$__prep_root",
+        "statement": "$content = file_get_contents($path);",
+        "php_binary": ["docker", "compose", "-f", "{compose_file}", "exec", "-T", "{compose_service}", "php"]
+      },
+      "effects": [
+        {
+          "kind": "compose_restart",
+          "argv": ["docker", "compose", "-f", "{compose_file}", "restart", "{compose_service}"],
+          "description": "restart only the PHP service so the patched source is loaded",
+          "timeout": 120
+        }
+      ]
+    },
+    "bind_published_port_to_loopback": {
+      "action_id": "compose.port_publication",
+      "eligibility": "review-only",
+      "description": "Restrict the published host port to 127.0.0.1.",
+      "params": {
+        "file": "{compose_file}",
+        "service": "web",
+        "port": "{host_port}",
+        "mode": "loopback",
+        "bind_address": "127.0.0.1"
+      },
+      "effects": [
+        {
+          "kind": "compose_up",
+          "argv": ["docker", "compose", "-f", "{compose_file}", "up", "-d", "--no-deps", "--no-build", "web"],
+          "description": "recreate only the web service; the notes volume is untouched",
+          "timeout": 180
+        }
+      ]
+    }
+  },
+  "verifiers": [
+    {
+      "verifier": "container.running",
+      "tier": "liveness",
+      "params": {"name": "{container_name}"},
+      "description": "the PHP container is running"
+    },
+    {
+      "verifier": "tcp.connect",
+      "tier": "liveness",
+      "params": {"host": "127.0.0.1", "port": "{host_port}"},
+      "description": "the published port accepts a connection"
+    },
+    {
+      "verifier": "http.request",
+      "tier": "protocol",
+      "params": {
+        "url": "http://127.0.0.1:{host_port}/api.php?action=healthz",
+        "expect_status": 200,
+        "expect_contains_any": ["\"status\":\"ok\"", "\"status\": \"ok\""]
+      },
+      "description": "health endpoint answers and reports the note store is readable"
+    },
+    {
+      "verifier": "http.request",
+      "tier": "protocol",
+      "params": {
+        "url": "http://127.0.0.1:{host_port}/download.php?file=welcome.txt",
+        "expect_status": 200,
+        "expect_contains": ["welcome to the fixture"]
+      },
+      "description": "a legitimate in-directory download still works"
+    },
+    {
+      "verifier": "http.request",
+      "tier": "protocol",
+      "params": {
+        "url": "http://127.0.0.1:{host_port}/download.php?file=legacy.txt",
+        "expect_status": 200,
+        "expect_contains": ["legacy file"]
+      },
+      "description": "a file that predates the patch still downloads (no storage-layout change)"
+    },
+    {
+      "verifier": "http.workflow",
+      "tier": "functional",
+      "required": true,
+      "params": {
+        "timeout": 5.0,
+        "steps": [
+          {
+            "name": "create",
+            "method": "POST",
+            "url": "http://127.0.0.1:{host_port}/api.php?action=create",
+            "body": {"title": "ctfctl-verify", "body": "synthetic row created by ctfctl verify"},
+            "expect_status": 201,
+            "extract": {"note_id": "$.id"}
+          },
+          {
+            "name": "read",
+            "method": "GET",
+            "url": "http://127.0.0.1:{host_port}/api.php?action=read&id={note_id}",
+            "expect_status": 200,
+            "expect_contains": ["synthetic row created by ctfctl verify"]
+          },
+          {
+            "name": "delete",
+            "method": "DELETE",
+            "url": "http://127.0.0.1:{host_port}/api.php?action=delete&id={note_id}",
+            "expect_status": [204, 200]
+          },
+          {
+            "name": "read-after-delete",
+            "method": "GET",
+            "url": "http://127.0.0.1:{host_port}/api.php?action=read&id={note_id}",
+            "expect_status": 404
+          }
+        ]
+      },
+      "description": "legitimate create/read/delete round trip (also proves application state survived the patch)"
+    },
+    {
+      "verifier": "file.check",
+      "tier": "static",
+      "params": {
+        "path": "{php_file}",
+        "contains": "realpath(",
+        "not_contains": "$path = files_dir() . '/' . $file;\nif (!is_file($path))"
+      },
+      "description": "the containment guard is present in the patched file"
+    }
+  ],
+  "exploit_probe": {
+    "verifier": "http.request",
+    "params": {
+      "url": "http://127.0.0.1:{host_port}/download.php?file=../../canary.txt",
+      "expect_status": [200, 400, 403, 404],
+      "must_not_contain": ["FIXTURE_CANARY_value_outside_the_download_root"]
+    },
+    "description": "the traversal probe must not return the canary that lives outside the download root"
+  }
+}

@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# ctfctl — thin wrapper so the toolkit runs from a checkout with no install step.
+#
+#   ./ctfctl doctor
+#   ./ctfctl discover --save
+#   ./ctfctl plan
+#
+# Python 3.9+ with the standard library is the only requirement.
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+PY="${CTFCTL_PYTHON:-}"
+if [ -z "$PY" ]; then
+  if command -v python3 >/dev/null 2>&1; then
+    PY=python3
+  elif command -v python >/dev/null 2>&1; then
+    PY=python
+  else
+    echo "ctfctl: no python3 (or python) found on PATH" >&2
+    exit 2
+  fi
+fi
+
+PYTHONPATH="$here/tools${PYTHONPATH:+:$PYTHONPATH}" exec "$PY" -m ctfctl "$@"

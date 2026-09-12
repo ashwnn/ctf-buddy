@@ -1,0 +1,171 @@
+{
+  "schema": "ctfctl.profile/1",
+  "profile_id": "web-nginx-flask-compose",
+  "title": "Flask/Gunicorn service behind an nginx reverse proxy in one Compose project",
+  "scope": "compose-project",
+  "support_level": "tested-auto",
+  "requires": ["docker", "docker compose"],
+  "notes": [
+    "Container scope only: this profile never changes the host firewall, SSH configuration or anything outside the Compose project directory.",
+    "The DNS/proxy hop is verified through the published proxy port, not by connecting to the upstream directly. A checker that bypasses the proxy is not covered by these checks.",
+    "The tier-3 workflow writes a synthetic note and deletes it. It does not prove the organiser checker will pass; it proves the application still performs its own legitimate state transitions."
+  ],
+  "detect": {
+    "all": [
+      {
+        "predicate": "container_running",
+        "args": {"name_regex": "(^|-)web$", "image_regex": "python|flask|gunicorn"}
+      },
+      {
+        "predicate": "listener_present",
+        "args": {"published": true}
+      },
+      {
+        "predicate": "file_exists",
+        "args": {"path_glob": "service/app.py"}
+      }
+    ],
+    "any": [
+      {"predicate": "container_running", "args": {"compose_service_regex": "web|app|api"}},
+      {"predicate": "proxy_upstream", "args": {"kind": "nginx"}}
+    ]
+  },
+  "facts": {
+    "compose_project": {"resolver": "compose_project"},
+    "compose_service": {"resolver": "compose_service"},
+    "container_name": {"resolver": "container_name"},
+    "compose_file": {"resolver": "compose_file"},
+    "project_dir": {"resolver": "project_dir"},
+    "host_port": {"resolver": "host_port"},
+    "app_file": {"resolver": "path_in_project_dir", "relative": "service/app.py"}
+  },
+  "actions": {
+    "patch_download_traversal": {
+      "action_id": "file.python_flask_send_from_directory",
+      "eligibility": "auto",
+      "description": "Replace the single send_file(os.path.join(ROOT, name)) call with send_from_directory.",
+      "params": {
+        "path": "{app_file}"
+      },
+      "effects": [
+        {
+          "kind": "compose_restart",
+          "argv": ["docker", "compose", "-f", "{compose_file}", "restart", "{compose_service}"],
+          "description": "restart only the application service so the patched source is loaded",
+          "timeout": 120
+        }
+      ]
+    },
+    "bind_published_port_to_loopback": {
+      "action_id": "compose.port_publication",
+      "eligibility": "review-only",
+      "description": "Restrict one published host port to 127.0.0.1.",
+      "params": {
+        "file": "{compose_file}",
+        "service": "proxy",
+        "port": "{host_port}",
+        "mode": "loopback",
+        "bind_address": "127.0.0.1"
+      },
+      "effects": [
+        {
+          "kind": "compose_up",
+          "argv": ["docker", "compose", "-f", "{compose_file}", "up", "-d", "--no-deps", "--no-build", "proxy"],
+          "description": "recreate only the proxy service; the notes volume is untouched",
+          "timeout": 180
+        }
+      ]
+    }
+  },
+  "verifiers": [
+    {
+      "verifier": "container.running",
+      "tier": "liveness",
+      "params": {"name": "{container_name}"},
+      "description": "the application container is running"
+    },
+    {
+      "verifier": "tcp.connect",
+      "tier": "liveness",
+      "params": {"host": "127.0.0.1", "port": "{host_port}"},
+      "description": "the published proxy port accepts a connection"
+    },
+    {
+      "verifier": "http.request",
+      "tier": "protocol",
+      "params": {
+        "url": "http://127.0.0.1:{host_port}/healthz",
+        "expect_status": 200,
+        "expect_contains_any": ["\"status\":\"ok\"", "\"status\": \"ok\""]
+      },
+      "description": "health endpoint answers and reports the database is readable"
+    },
+    {
+      "verifier": "http.request",
+      "tier": "protocol",
+      "params": {
+        "url": "http://127.0.0.1:{host_port}/files?name=welcome.txt",
+        "expect_status": 200,
+        "expect_contains": ["welcome to the fixture"]
+      },
+      "description": "a legitimate in-directory download still works through the proxy"
+    },
+    {
+      "verifier": "http.workflow",
+      "tier": "functional",
+      "required": true,
+      "params": {
+        "timeout": 5.0,
+        "steps": [
+          {
+            "name": "create",
+            "method": "POST",
+            "url": "http://127.0.0.1:{host_port}/api/notes",
+            "body": {"title": "ctfctl-verify", "body": "synthetic row created by ctfctl verify"},
+            "expect_status": 201,
+            "extract": {"note_id": "$.id"}
+          },
+          {
+            "name": "read",
+            "method": "GET",
+            "url": "http://127.0.0.1:{host_port}/api/notes/{note_id}",
+            "expect_status": 200,
+            "expect_contains": ["synthetic row created by ctfctl verify"]
+          },
+          {
+            "name": "delete",
+            "method": "DELETE",
+            "url": "http://127.0.0.1:{host_port}/api/notes/{note_id}",
+            "expect_status": [204, 200]
+          },
+          {
+            "name": "read-after-delete",
+            "method": "GET",
+            "url": "http://127.0.0.1:{host_port}/api/notes/{note_id}",
+            "expect_status": 404
+          }
+        ]
+      },
+      "description": "legitimate create/read/delete round trip through the proxy ingress (also proves application state survived the patch)"
+    },
+    {
+      "verifier": "file.check",
+      "tier": "static",
+      "params": {
+        "path": "{app_file}",
+        "contains": "send_from_directory",
+        "not_contains": "send_file(os.path.join"
+      },
+      "description": "the patched source no longer contains the vulnerable call shape"
+    }
+  ],
+  "exploit_probe": {
+    "verifier": "http.request",
+    "params": {
+      "url": "http://127.0.0.1:{host_port}/files?name=../../canary.txt",
+      "expect_status": [200, 400, 403, 404],
+      "must_not_contain": ["FIXTURE_CANARY_value_outside_the_download_root"]
+    },
+    "description": "the traversal probe must not return the canary that lives outside the download root"
+  }
+}

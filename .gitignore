@@ -1,0 +1,46 @@
+# Runtime state — never committed
+state/
+captures/
+backups/
+loot/
+runtime/
+
+# Generated search index (rebuildable: `ctfctl kb index --rebuild`)
+index/
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3.new
+
+# Local source snapshots that may not be redistributable
+sources/raw/
+sources/text/private/
+sources/local/
+
+# Secrets and local overrides
+.env
+.env.*
+*.pem
+*.key
+id_rsa*
+*.pcap
+*.pcapng
+*.cap
+targets.json
+targets.local.json
+
+# Build/packaging output
+dist/
+build/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Editor/OS noise
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

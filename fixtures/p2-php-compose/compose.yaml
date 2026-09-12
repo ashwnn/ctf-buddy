@@ -1,0 +1,23 @@
+services:
+  web:
+    build:
+      context: ./service
+    container_name: p2-web
+    environment:
+      NOTES_DIR: /data/notes
+      FILES_DIR: /srv/app/files
+    volumes:
+      - notes:/data
+      - ./service/public:/srv/app/public:ro
+      - ./service/lib:/srv/app/lib:ro
+    ports:
+      - "8081:80"
+    healthcheck:
+      test: ["CMD", "php", "-r", "$c=@file_get_contents('http://127.0.0.1/healthz');exit($c?0:1);"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  notes: {}
