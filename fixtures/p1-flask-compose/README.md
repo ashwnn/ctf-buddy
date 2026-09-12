@@ -17,15 +17,21 @@ proxy (nginx:1.27-alpine, published 127.0.0.1:8080 -> 80)
 `service/app.py`:
 
 ```python
-@app.get("/files/<path:name>")
-def get_file(name):
+@app.get("/files")
+def get_file():
+    name = request.args.get("name", "")
     return send_file(os.path.join(UPLOAD_DIR, name), as_attachment=True)
 ```
 
 `send_file(os.path.join(...))` trusts the client-supplied name, so
-`/files/..%2f..%2fcanary.txt` escapes `uploads/`. The narrow fix is
+`GET /files?name=../../canary.txt` escapes `uploads/`. The narrow fix is
 `send_from_directory(UPLOAD_DIR, name, ...)` — the same route, the same
 response options, the same legitimate downloads.
+
+The path-segment variant (`/files/<path:name>`) is deliberately **not**
+reachable through the bundled nginx config: nginx rejects an encoded-slash
+traversal before it reaches Flask. That difference is part of the exercise:
+"it did not work through the proxy" is not the same as "it is not vulnerable".
 
 ## Legitimate workflow that must keep working
 
@@ -55,8 +61,15 @@ because the fixture has no data worth keeping.
 ## Practice
 
 ```bash
-./ctfctl run discovery+plan   # see README "Reproduce the validated run"
+./ctfctl discover --json                                   # what is this host?
+./ctfctl plan --profile web-nginx-flask-compose --verbose  # exact diff + checks
+./ctfctl apply --plan latest --yes                         # patch, verify, or roll back
+./ctfctl verify --plan latest                              # re-run the health checks
+./ctfctl rollback --tx <tx-id> --yes                       # restore the vulnerable state
 ```
+
+Drill 01 (`drills/01-web-diagnosis-and-patch.md`) walks the diagnosis and the
+narrow patch end to end; drill 04 covers regression and conflicting rollback.
 
 Use `docker compose logs web` to watch the fixture's own request log while
 attacking it. Everything here binds to loopback by default.
