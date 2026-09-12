@@ -436,6 +436,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="honeypot listener type (banner fakes an ssh/smtp/ftp greeting)",
     )
     r.add_argument("--honeypot-banner", default="", help="banner text or preset name")
+    r.add_argument(
+        "--lockdown",
+        action="store_true",
+        help="also plan AND apply the review-only lockdown (needs --approve-review --yes)",
+    )
+    r.add_argument(
+        "--allow-cidr",
+        action="append",
+        default=[],
+        help="team/checker range the lockdown keeps reachable (repeatable)",
+    )
     r.add_argument("--yes", action="store_true", help="required for any mutation")
     r.add_argument("--json", action="store_true")
 
@@ -1356,6 +1367,8 @@ def cmd_remote(args: argparse.Namespace) -> int:
             honeypot_port=args.honeypot_port,
             honeypot_mode=args.honeypot_mode,
             honeypot_banner=args.honeypot_banner,
+            lockdown_requested=args.lockdown,
+            allow_cidrs=list(args.allow_cidr),
             yes=args.yes,
         )
         if args.json:

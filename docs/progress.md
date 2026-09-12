@@ -71,9 +71,9 @@ searches within the tag.
   a second render) and `VerifyResult` was constructed with a `command` argument
   that does not exist; both fixed and covered.
 
-**Verification:** `python tests/run_tests.py` -> **168 passed, 0 failed, 0 modules
-skipped** (104.3 s) with Docker available. New modules: `t_lockdown` (13),
-`t_honeypot` (7), `t_remote_ops` (12), `t_integration_lockdown` (1); `t_engine`
+**Verification:** `python tests/run_tests.py` -> **170 passed, 0 failed, 0 modules
+skipped** (101.6 s) with Docker available. New modules: `t_lockdown` (13),
+`t_honeypot` (7), `t_remote_ops` (14), `t_integration_lockdown` (1); `t_engine`
 and `t_kbindex` gained lock-reclaim and cheat-sheet tests. Details and the
 explicit not-run list are in `docs/validation.md`.
 
@@ -85,9 +85,9 @@ reports the cheat-sheet count and the honeypot/lockdown capability lines.
 
 **Release:** version bumped to 0.2.0; `python tools/package_release.py --json` built
 `dist/ctf-buddy-0.2.0.tar.gz` (215 files, deterministic, sha256
-`246c7a12e76cf1aefa3f8b1e1011285940790ee75e3c2fb2d98147ebfc261263`), `--check`
+`c684582aef9ebb9db0f08c7cac2cd56f5be54afac02c1ab00a088fc61b74199b`), `--check`
 verified it against its manifest, and `--rehearse` extracted it and ran the whole
-suite from the extracted tree: **168 passed, 0 failed, 0 modules skipped, 103.0 s**.
+suite from the extracted tree: **170 passed, 0 failed, 0 modules skipped, 105.5 s**.
 
 ## 2026-09-12 (later) — Docker integration, real SSH lab, drills, release, template
 

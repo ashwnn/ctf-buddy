@@ -101,6 +101,13 @@ On Windows, use `python tools\ctfctl.py <command>` instead of `./ctfctl`.
 ### Defend and distract (all review-only or explicitly confirmed)
 
 ```bash
+# The whole defensive pass in one command: patch, honeypot, then lockdown.
+# Order matters: the honeypot port is added to the allowlist it would otherwise
+# be dropped by. Needs the console open and the allowlist read out loud first.
+./ctfctl remote auto 10.10.5.3 \
+  --apply --honeypot-port 8080 --lockdown --allow-cidr 10.10.0.0/16 \
+  --approve-review --yes
+
 # Additive nftables allowlist + sshd key-only hardening. Creates ONE table and
 # never flushes anything; your own SSH address is always in the allowlist.
 ./ctfctl remote lockdown 10.10.5.3 --allow-cidr 10.10.0.0/16

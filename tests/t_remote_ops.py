@@ -373,3 +373,78 @@ def test_cli_remote_auto_and_lockdown_dispatch() -> None:
                  "the CLI must forward the operator address")
         sent = [c["argv"][-1] for c in fake.calls if "lockdown plan" in c["argv"][-1]]
         check_in("--allow-cidr 10.10.0.0/16", sent[-1], "the team range must reach the target")
+
+
+def test_auto_lockdown_needs_approve_review_and_yes() -> None:
+    with remote_repo() as root:
+        remote.declare_target("vulnbox", label="lab", ack_policy=True, root=root)
+        with fake_ssh() as fake:
+            try:
+                remote.auto(remote.Conn(host="vulnbox"), root=root,
+                            lockdown_requested=True, approve_review=False, yes=True)
+            except util.CtfError as exc:
+                check_in("--approve-review", str(exc) + (exc.hint or ""),
+                         "the review-only gate must be explicit")
+            else:
+                raise Failure("--lockdown without --approve-review must be refused")
+            check_eq(len(fake.calls), 0, "no ssh before the review gate")
+            try:
+                remote.auto(remote.Conn(host="vulnbox"), root=root,
+                            lockdown_requested=True, approve_review=True, yes=False)
+            except util.CtfError as exc:
+                check_in("--yes", str(exc) + (exc.hint or ""), "the --yes gate must hold")
+            else:
+                raise Failure("--lockdown without --yes must be refused")
+            check_eq(len(fake.calls), 0, "no ssh before the --yes gate")
+
+
+def test_auto_runs_patch_honeypot_lockdown_in_order() -> None:
+    with remote_repo() as root:
+        remote.declare_target("vulnbox", label="lab", ack_policy=True, root=root)
+        lockdown_payload = json.dumps({"plans": [
+            {**t_remote._plan_doc("sha256:lock"),
+             "detection": {"matched": True, "facts": {}},
+             "actions": [{"key": "firewall", "action_id": "firewall.nft_lockdown_table",
+                          "target_path": "/etc/ctfctl-lockdown.nft",
+                          "eligibility": "review-only", "diff": "d", "notes": [],
+                          "params": {}, "pre_state": {}, "skipped_reason": "",
+                          "validation": [], "effects": []}]}],
+            "remote": {"operator_cidr": "203.0.113.9/32", "allowed_ports": [22, 8080]}})
+        apply_json = json.dumps({"tx_id": "tx-1", "phase": "COMMITTED", "plan": "sha256:abc",
+                                 "files": [], "verification": [], "errors": [],
+                                 "ok": True})
+        with fake_ssh() as fake:
+            _auto_routes(fake, root)
+            fake.route("SSH_CONNECTION", 0, "client_ip=203.0.113.9\nnft=present\n")
+            fake.route("ctfctl lockdown plan", 0, lockdown_payload)
+            fake.route("ctfctl apply", 0, apply_json)
+            fake.route("honeypot start", 0, json.dumps(_honeypot_entry()))
+            report = remote.auto(
+                remote.Conn(host="vulnbox"), root=root, yes=True,
+                apply_mutations=True, approve_review=True,
+                honeypot_port=8080, lockdown_requested=True,
+                allow_cidrs=["10.10.0.0/16"],
+            )
+        check_in("apply", report["steps"], "the profile patch must run")
+        check_in("honeypot", report["steps"], "the honeypot must start")
+        check_in("lockdown_plan", report["steps"], "the lockdown plan must be pulled")
+        check_in("lockdown_apply", report["steps"], "the lockdown must be applied")
+        order = [c["argv"][-1] for c in fake.calls
+                 if "-m ctfctl" in " ".join(c["argv"])]
+        markers = []
+        for command in order:
+            for needle in ("ctfctl apply", "honeypot start", "lockdown plan", "ctfctl lockdown plan"):
+                if needle in command:
+                    markers.append(needle)
+        check(markers.index("honeypot start") < len(markers), "honeypot before lockdown")
+        lockdown_call = [c["argv"][-1] for c in fake.calls
+                         if "lockdown plan" in c["argv"][-1]][-1]
+        check_in("8080", lockdown_call,
+                 "the honeypot port must be in the lockdown allowlist")
+        check("lockdown plan" not in markers[:markers.index("honeypot start")],
+              "the lockdown must be planned after the honeypot started")
+        apply_calls = [c["argv"][-1] for c in fake.calls if "ctfctl apply" in c["argv"][-1]]
+        check(any("--approve-review" in call for call in apply_calls),
+              "the lockdown apply must carry the review approval")
+        markdown = open(os.path.join(root, report["report_markdown"]), encoding="utf-8").read()
+        check_in("## Lockdown plan", markdown, "the report must show the lockdown plan")

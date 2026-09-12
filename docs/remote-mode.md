@@ -144,6 +144,10 @@ ctfctl remote recover 10.10.5.3
 ctfctl remote auto 10.10.5.3                    # read-only: probe, discover, plan, report
 ctfctl remote auto 10.10.5.3 --apply --yes      # also apply the first matching tested-auto plan
 ctfctl remote auto 10.10.5.3 --honeypot-port 8080 --yes
+
+# everything at once: patch, honeypot, lockdown (console open, allowlist read)
+ctfctl remote auto 10.10.5.3 --apply --honeypot-port 8080 \
+  --lockdown --allow-cidr 10.10.0.0/16 --approve-review --yes
 ```
 
 `auto` runs the whole read-only pipeline for one IP and writes two files under
@@ -151,8 +155,13 @@ ctfctl remote auto 10.10.5.3 --honeypot-port 8080 --yes
 listing identity, listeners, containers, firewall posture, detected stacks, the
 exact plan actions, evidence gaps, and suggested unused ports for a honeypot.
 
-It is **read-only unless you pass `--apply` and/or `--honeypot-port`, each of
-which also requires `--yes`**. `--apply` uses the same gated apply path as
+It is **read-only unless you pass `--apply`, `--honeypot-port` and/or
+`--lockdown`, each of which also requires `--yes`; `--lockdown` additionally
+requires `--approve-review`** (it applies a review-only plan, so it cannot be
+reached without saying so explicitly). The order when all three are requested is
+**patch -> honeypot -> lockdown**, and the honeypot port is added to the lockdown
+allowlist: otherwise the firewall would drop the very traffic the honeypot exists
+to collect. `--apply` uses the same gated apply path as
 `remote apply` (including the automatic rollback on verification failure and the
 operator-side reconnect check for access-affecting changes); `--honeypot-port`
 uses the same gated path as `remote honeypot`. If the target has no `python3`,

@@ -21,7 +21,7 @@ unseen organizer checker passes.
 python tests/run_tests.py
 ```
 
-Result (2026-09-12, latest): **168 passed, 0 failed, 0 modules skipped, 104.3 s**,
+Result (2026-09-12, latest): **170 passed, 0 failed, 0 modules skipped, 101.6 s**,
 exit code 0. Docker was available, so both container modules ran instead of
 skipping.
 
@@ -29,7 +29,7 @@ skipping.
 |---|---|---|
 | `t_engine` | 22 | Apply/rollback, stale plans, interrupted transactions, conflicting rollback, single-writer lock (including reclaiming a lock left by a dead process), failed syntax validation, functional regression -> automatic rollback, repeated apply, metadata preservation, line endings |
 | `t_remote` | 22 | Host injection refusal, ssh argv construction, bundle contents, fingerprint change, probe parsing (ss/netstat/proc), declaration gate before ssh, two-pass plan, policy gate, `--yes` gate, apply mirroring, flag absorption for `remote run`, read-only allowlist, unreachable-host message |
-| `t_remote_ops` | 12 | `remote auto` read-only default + report files + `--yes` gate + graceful degradation without python3; honeypot gates and argument forwarding; `collect` refusing unvalidated paths; lockdown reading the operator address from the ssh session; the access-recheck auto-rollback after an ssh/firewall change |
+| `t_remote_ops` | 14 | `remote auto` read-only default + report files + `--yes` gate + graceful degradation without python3; honeypot gates and argument forwarding; `collect` refusing unvalidated paths; lockdown reading the operator address from the ssh session; the access-recheck auto-rollback after an ssh/firewall change |
 | `t_lockdown` | 13 | Additive ruleset rendering, `/0` and operator-excluding allowlists refused, effect/rollback argv shape, nft effect allowlist, sshd `Match`/empty-config refusal, key-required validation, idempotent second render, review-only plan shape, verifier pruning, and the `file_create` apply/rollback/conflict paths |
 | `t_honeypot` | 7 | Busy/privileged/invalid ports refused, listener cap, HTTP lure logging with `decoy=true`, banner mode speaking first, per-port stop |
 | `t_integration_lockdown` | 1 | End-to-end lockdown inside a disposable container: create + load + verify + rollback of the nftables file, sshd config restore, effect dispatch and rollback effect, honeypot serving and logging (`nft`/`sshd` stubbed) |

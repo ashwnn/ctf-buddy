@@ -1907,6 +1907,8 @@ def auto(
     honeypot_port: int = 0,
     honeypot_mode: str = "http",
     honeypot_banner: str = "",
+    lockdown_requested: bool = False,
+    allow_cidrs: Sequence[str] = (),
     yes: bool = False,
     root: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -1916,20 +1918,31 @@ def auto(
     written report. Mutations happen only when asked for *and* confirmed with
     --yes, and they reuse exactly the same gated paths as the individual
     commands (declaration, policy, review-only approval, auto-rollback).
+
+    Order when everything is requested: patch first, honeypot second, lockdown
+    last (with the honeypot port in its allowlist, or the honeypot would be
+    dropped by the very rules meant to protect it).
     """
     root = root or util.repo_root()
     require_declaration(conn.host, root)
-    if (apply_mutations or honeypot_port) and not yes:
+    if (apply_mutations or honeypot_port or lockdown_requested) and not yes:
         raise util.CtfError(
             "refusing to change anything without --yes",
             hint="the read-only pipeline runs by itself; add --yes when you have read the plan "
                  "and want the mutations applied",
         )
+    if lockdown_requested and not approve_review:
+        raise util.CtfError(
+            "--lockdown applies a review-only plan, so it needs --approve-review",
+            hint="run `ctfctl remote lockdown <host> --allow-cidr <TEAM_RANGE>` first, read "
+                 "the diff and the allowlist, then re-run with --lockdown --approve-review "
+                 "--yes while the console is open",
+        )
     report: Dict[str, Any] = {
         "schema": "ctfctl.auto/1",
         "host": conn.target,
         "started_at": util.iso_now(),
-        "mutations_requested": bool(apply_mutations or honeypot_port),
+        "mutations_requested": bool(apply_mutations or honeypot_port or lockdown_requested),
         "steps": {},
         "gaps": [],
         "next_actions": [],
@@ -2026,6 +2039,43 @@ def auto(
             report["next_actions"].append(
                 "the honeypot did not start: pick a free port and check the target's firewall"
             )
+
+    if lockdown_requested:
+        # The honeypot port must survive the lockdown, or the distraction is
+        # dropped by the rules meant to protect the box.
+        extra_ports = [int(honeypot_port)] if honeypot_port else []
+        plan_payload = lockdown(
+            conn, allow_cidrs=list(allow_cidrs), allow_ports=extra_ports, root=root,
+        )
+        report["steps"]["lockdown_plan"] = plan_payload
+        entries = [
+            entry for entry in (plan_payload.get("plans") or [])
+            if (entry.get("detection") or {}).get("matched") and entry.get("actions")
+        ]
+        if not entries:
+            report["steps"]["lockdown_apply"] = {
+                "applied": False,
+                "reason": "no lockdown action could be rendered on this host; "
+                          "see the plan's skipped entries",
+            }
+        elif not is_policy_acknowledged(root):
+            raise util.CtfError(
+                "the event policy is not acknowledged on this machine",
+                hint=f"re-run: ctfctl targets declare {conn.host} --label <label> --ack-policy",
+            )
+        else:
+            entry = entries[0]
+            code, payload = apply(
+                conn, str(entry.get("plan_id") or "latest"), yes=True,
+                approve_review=True, root=root,
+            )
+            report["steps"]["lockdown_apply"] = payload
+            report["lockdown_exit_code"] = code
+            if code != util.EXIT_OK:
+                report["next_actions"].append(
+                    "the lockdown did not commit: read the apply result, then decide whether "
+                    "to retry or leave the box as it is"
+                )
 
     # 6. Persist a report an operator can read and hand over.
     report["finished_at"] = util.iso_now()
@@ -2137,6 +2187,30 @@ def render_auto_report(report: Dict[str, Any]) -> str:
         if recheck:
             lines.append(
                 f"- operator reconnect after the change: {recheck.get('ok')} "
+                f"({recheck.get('action')})"
+            )
+    lockdown_plan = (report.get("steps") or {}).get("lockdown_plan")
+    if lockdown_plan:
+        meta = lockdown_plan.get("remote") or {}
+        lines += ["", "## Lockdown plan", "",
+                  f"- operator address kept reachable: {meta.get('operator_cidr')}",
+                  f"- ports kept reachable: {meta.get('allowed_ports')}"]
+        for entry in lockdown_plan.get("plans") or []:
+            for action in entry.get("actions") or []:
+                skip = action.get("skipped_reason")
+                lines.append(
+                    f"- {action.get('key')}: {action.get('action_id')}"
+                    + (f" - skipped: {skip}" if skip else f" [{action.get('eligibility')}]")
+                )
+    lockdown_apply = (report.get("steps") or {}).get("lockdown_apply")
+    if lockdown_apply:
+        lines += ["", "## Lockdown apply", "",
+                  f"phase={lockdown_apply.get('phase')} ok={lockdown_apply.get('ok')} "
+                  f"tx={lockdown_apply.get('tx_id')}"]
+        recheck = lockdown_apply.get("access_recheck")
+        if recheck:
+            lines.append(
+                f"- operator reconnect after the lockdown: {recheck.get('ok')} "
                 f"({recheck.get('action')})"
             )
     honeypot_state = (report.get("steps") or {}).get("honeypot")

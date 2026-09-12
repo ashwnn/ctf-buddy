@@ -27,7 +27,7 @@ construction.
 | Decoy / honeypot | Supported | Local loopback only | Off until rules acknowledged and an unused port is named; never binds a busy port |
 | Remote honeypot (`remote honeypot`) | Supported | Supported | Declaration + policy ack + `--yes` to start/stop; status/logs/collect are read-only |
 | Remote lockdown (`remote lockdown`) | Supported (review-only) | Supported (plan only) | Additive nftables table + sshd key-only; needs `--approve-review --yes`, always keeps the operator's SSH address, and wants a console open |
-| One-command recon (`remote auto`) | Supported | Supported | Read-only by default; `--apply`/`--honeypot-port` additionally require `--yes` |
+| One-command recon (`remote auto`) | Supported | Supported | Read-only by default; `--apply`/`--honeypot-port` additionally require `--yes`, `--lockdown` also requires `--approve-review`; order is patch -> honeypot -> lockdown |
 
 ## Shipped stack profiles
 
