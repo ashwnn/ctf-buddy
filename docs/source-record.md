@@ -40,7 +40,7 @@ dependency and records can be appended by parallel workers and merged.
 
 ## Verification
 
-`tools/ctfctl/kb.py verify` checks structural validity (required fields, ID
-format, duplicate URLs/hashes, card→source resolution). `--check-urls` (online
-only, opt-in) confirms that `canonical_url` values still resolve; that must be
-run as part of `prep-online`, never during the event.
+`ctfctl kb verify` checks structural validity (required fields, ID
+format, duplicate URLs/hashes, card→source resolution). URL re-resolution is
+online-only and opt-in via `ctfctl prep-online --check-sources`; that must be
+run before the event, never during it.

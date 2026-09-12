@@ -28,6 +28,11 @@ Internet access and no API credentials.
 6. **Honest reporting.** Tests that were not run are reported as not run.
    Containers do not validate host firewall or SSH changes. Label our functional
    checks as *our* checks, not proof that an unseen organizer checker passes.
+7. **Remote is still scoped.** `ctfctl remote ...` is SSH to a host declared in
+   `state/targets.json`. Host strings are validated before they reach an argv;
+   the remote command set is a closed allowlist, never a free-form shell;
+   mutations additionally require an acknowledged policy and `--yes`. No
+   passwords are stored and no remote SSH/firewall config is edited.
 
 ## Layout
 
@@ -60,6 +65,9 @@ state/               runtime state (ignored)
   stale), `2` usage error, `3` internal error.
 - JSON on stdout for machine modes (`--json`); human summaries otherwise.
   Diagnostics always go to stderr.
+- Remote paths are POSIX by construction: never `os.path.join` a remote path, or
+  a Windows operator sends `state\targets.json` to Linux. Local state paths are
+  the only place platform separators belong.
 
 ## Card conventions (kb/)
 
