@@ -50,8 +50,8 @@ DEFAULT_PATHS = ["/admin", "/admin.php", "/.env", "/wp-login.php", "/backup.zip"
 
 DECOY_PAGE = (
     "<!doctype html><html><head><title>Sign in</title></head><body>"
-    "<h1>Sign in</h1><form method=\"post\"><input name=\"user\"><input name=\"pass\""
-    " type=\"password\"><button>Continue</button></form>"
+    '<h1>Sign in</h1><form method="post"><input name="user"><input name="pass"'
+    ' type="password"><button>Continue</button></form>'
     "<p>Internal use only.</p></body></html>"
 )
 
@@ -105,13 +105,20 @@ def save_policy(policy: DecoyPolicy, root: Optional[str] = None) -> str:
     return path
 
 
-def enable(root: Optional[str], *, ports: List[int], paths: List[str], bind: str,
-           notes: str, acknowledge: bool) -> DecoyPolicy:
+def enable(
+    root: Optional[str],
+    *,
+    ports: List[int],
+    paths: List[str],
+    bind: str,
+    notes: str,
+    acknowledge: bool,
+) -> DecoyPolicy:
     if not acknowledge:
         raise util.CtfError(
             "decoy use requires explicit acknowledgement of the event rules",
             hint="re-run with --ack-rules after confirming decoys are permitted and these "
-                 "ports/paths are unused by scored services",
+            "ports/paths are unused by scored services",
         )
     if not ports:
         raise util.CtfError("at least one unused port must be named with --port")
@@ -130,9 +137,14 @@ def enable(root: Optional[str], *, ports: List[int], paths: List[str], bind: str
                 f"port {port} is already listening on {bind}: it may be a scored service",
                 hint="choose a port that nothing is using; never displace a scored service",
             )
-    policy = DecoyPolicy(acknowledged=True, allowed_ports=sorted(set(ports)),
-                         allowed_paths=sorted(set(paths or DEFAULT_PATHS)), bind=bind,
-                         notes=notes, acknowledged_at=util.iso_now())
+    policy = DecoyPolicy(
+        acknowledged=True,
+        allowed_ports=sorted(set(ports)),
+        allowed_paths=sorted(set(paths or DEFAULT_PATHS)),
+        bind=bind,
+        notes=notes,
+        acknowledged_at=util.iso_now(),
+    )
     save_policy(policy, root)
     return policy
 
@@ -201,8 +213,10 @@ class BoundedThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPSe
     def process_request(self, request: Any, client_address: Any) -> None:
         if not self._slots.acquire(blocking=False):
             try:
-                request.sendall(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n"
-                                b"Content-Length: 0\r\nX-Decoy: ctfctl\r\n\r\n")
+                request.sendall(
+                    b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n"
+                    b"Content-Length: 0\r\nX-Decoy: ctfctl\r\n\r\n"
+                )
             except OSError:
                 pass
             self.shutdown_request(request)
@@ -270,24 +284,29 @@ class DecoyHandler(http.server.BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         server: DecoyServer = self.server  # type: ignore[assignment]
         configured = path in server.allowed_paths
-        server.record({
-            "event": "decoy-http",
-            "decoy": True,
-            "method": method,
-            "path": path,
-            # The full target is recorded, but escaped and length-capped: attacker
-            # input must never be able to forge a log line or move a terminal cursor.
-            "target": util.printable(self.path, 200),
-            "query_present": "?" in self.path,
-            "status": 200 if configured else 404,
-            "configured_path": configured,
-            "user_agent": self.headers.get("User-Agent", "") if self.headers else "",
-            "body_bytes": consumed,
-            "body_truncated": bool(length and length.isdigit()
-                                   and int(length) > MAX_BODY_BYTES),
-            "client": self.client_address[0],
-            "marker": server.marker,
-        })
+        server.record(
+            {
+                "event": "decoy-http",
+                "decoy": True,
+                "method": method,
+                "path": path,
+                # The full target is recorded, but escaped and length-capped: attacker
+                # input must never be able to forge a log line or move a terminal cursor.
+                "target": util.printable(self.path, 200),
+                "query_present": "?" in self.path,
+                "status": 200 if configured else 404,
+                "configured_path": configured,
+                "user_agent": self.headers.get("User-Agent", "")
+                if self.headers
+                else "",
+                "body_bytes": consumed,
+                "body_truncated": bool(
+                    length and length.isdigit() and int(length) > MAX_BODY_BYTES
+                ),
+                "client": self.client_address[0],
+                "marker": server.marker,
+            }
+        )
         if method == "HEAD":
             self.send_response(200 if configured else 404)
             self.send_header("Content-Length", "0")
@@ -307,8 +326,13 @@ class DecoyHandler(http.server.BaseHTTPRequestHandler):
 
     def log_error(self, fmt: str, *args: Any) -> None:
         server: DecoyServer = self.server  # type: ignore[assignment]
-        server.record({"event": "decoy-error", "decoy": True,
-                       "detail": util.printable(fmt % args, 200)})
+        server.record(
+            {
+                "event": "decoy-error",
+                "decoy": True,
+                "detail": util.printable(fmt % args, 200),
+            }
+        )
 
 
 class DecoyServer(BoundedThreadingHTTPServer):
@@ -325,16 +349,25 @@ class DecoyServer(BoundedThreadingHTTPServer):
                 return
             payload = {
                 "at": util.iso_now(),
-                **{k: (util.printable(v, 300) if isinstance(v, str) else v)
-                   for k, v in event.items()},
+                **{
+                    k: (util.printable(v, 300) if isinstance(v, str) else v)
+                    for k, v in event.items()
+                },
             }
             line = json.dumps(payload, sort_keys=True) + "\n"
             if self._written + len(line) > MAX_LOG_BYTES:
                 self._stopped = True
-                line = json.dumps({
-                    "at": util.iso_now(), "event": "decoy-log-capped", "decoy": True,
-                    "reason": f"log byte budget {MAX_LOG_BYTES} reached",
-                }) + "\n"
+                line = (
+                    json.dumps(
+                        {
+                            "at": util.iso_now(),
+                            "event": "decoy-log-capped",
+                            "decoy": True,
+                            "reason": f"log byte budget {MAX_LOG_BYTES} reached",
+                        }
+                    )
+                    + "\n"
+                )
             try:
                 with open(self.log_path, "a", encoding="utf-8") as fh:
                     fh.write(line)
@@ -374,9 +407,17 @@ def serve(port: int, bind: str, paths: List[str], log_path: str, marker: str) ->
     server.allowed_paths = paths
     server.log_path = log_path
     server.marker = marker
-    server.record({"event": "decoy-started", "decoy": True, "bind": bind, "port": port,
-                   "paths": paths, "rlimits": notes,
-                   "warning": "decoy events are marked with decoy=true and X-Decoy: ctfctl"})
+    server.record(
+        {
+            "event": "decoy-started",
+            "decoy": True,
+            "bind": bind,
+            "port": port,
+            "paths": paths,
+            "rlimits": notes,
+            "warning": "decoy events are marked with decoy=true and X-Decoy: ctfctl",
+        }
+    )
     try:
         server.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:
@@ -394,7 +435,9 @@ def state_path(root: Optional[str] = None) -> str:
     return os.path.join(root or util.repo_root(), STATE_REL)
 
 
-def start(root: Optional[str], *, port: Optional[int] = None, bind: Optional[str] = None) -> Dict[str, Any]:
+def start(
+    root: Optional[str], *, port: Optional[int] = None, bind: Optional[str] = None
+) -> Dict[str, Any]:
     root = root or util.repo_root()
     policy = load_policy(root)
     if not policy.acknowledged:
@@ -423,18 +466,39 @@ def start(root: Optional[str], *, port: Optional[int] = None, bind: Optional[str
         if existing.get("pid") and _pid_alive(int(existing["pid"])):
             raise util.CtfError(f"a decoy is already running (pid {existing['pid']})")
 
-    log_path = os.path.join(util.captures_dir(root=root),
-                             f"decoy-{util.utc_stamp()}.jsonl")
+    log_path = os.path.join(
+        util.captures_dir(root=root), f"decoy-{util.utc_stamp()}.jsonl"
+    )
     marker = util.short_id("decoy", str(chosen), util.utc_stamp())
-    argv = [sys.executable, "-m", "ctfctl.decoy", "--serve",
-            "--port", str(chosen), "--bind", bind_address,
-            "--log", log_path, "--marker", marker,
-            "--paths", ",".join(policy.allowed_paths)]
+    argv = [
+        sys.executable,
+        "-m",
+        "ctfctl.decoy",
+        "--serve",
+        "--port",
+        str(chosen),
+        "--bind",
+        bind_address,
+        "--log",
+        log_path,
+        "--marker",
+        marker,
+        "--paths",
+        ",".join(policy.allowed_paths),
+    ]
     env = dict(os.environ)
-    env["PYTHONPATH"] = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + \
-        os.pathsep + env.get("PYTHONPATH", "")
-    proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            env=env, start_new_session=True)
+    env["PYTHONPATH"] = (
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        + os.pathsep
+        + env.get("PYTHONPATH", "")
+    )
+    proc = subprocess.Popen(
+        argv,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=env,
+        start_new_session=True,
+    )
     time.sleep(1.0)
     if proc.poll() is not None:
         raise util.CtfError(
@@ -456,13 +520,41 @@ def start(root: Optional[str], *, port: Optional[int] = None, bind: Optional[str
 
 
 def _pid_alive(pid: int) -> bool:
+    """Non-destructive liveness check.
+
+    POSIX: signal 0 is a pure permission/existence probe. Windows: os.kill is
+    destructive for every signal (it maps to TerminateProcess), and calling it
+    on a process that is mid-termination can block, so query the exit code
+    through the Win32 API instead.
+    """
     if pid <= 0:
         return False
+    if os.name == "nt":
+        return _pid_alive_windows(pid)
     try:
         os.kill(pid, 0)
         return True
     except OSError:
         return False
+
+
+def _pid_alive_windows(pid: int) -> bool:
+    import ctypes
+    from ctypes import wintypes
+
+    process_query_limited_information = 0x1000
+    still_active = 259
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    handle = kernel32.OpenProcess(process_query_limited_information, False, int(pid))
+    if not handle:
+        return False
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return False
+        return code.value == still_active
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def status(root: Optional[str] = None) -> Dict[str, Any]:
@@ -518,11 +610,26 @@ def stop(root: Optional[str] = None) -> Dict[str, Any]:
             time.sleep(0.25)
         if not stopped:
             try:
-                os.kill(pid, signal.SIGKILL)
+                # SIGKILL does not exist on Windows; SIGTERM is the strongest signal
+                # available there, and TerminateProcess is what it maps to.
+                hard_kill = getattr(signal, "SIGKILL", signal.SIGTERM)
+                os.kill(pid, hard_kill)
                 stopped = True
             except OSError:
                 stopped = False
     remaining = any_port_listening(port) if port else []
+    # Process teardown and socket release are not atomic on every platform
+    # (Windows in particular reports the process gone a moment before the
+    # listening socket disappears). Wait briefly before declaring the port free.
+    if not remaining:
+        pass
+    else:
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            time.sleep(0.25)
+            remaining = any_port_listening(port)
+            if not remaining:
+                break
     try:
         os.unlink(state_file)
     except OSError:
@@ -542,8 +649,9 @@ def stop(root: Optional[str] = None) -> Dict[str, Any]:
 def _main(argv: Optional[List[str]] = None) -> int:
     import argparse
 
-    parser = argparse.ArgumentParser(prog="ctfctl.decoy",
-                                     description="minimal unprivileged HTTP decoy")
+    parser = argparse.ArgumentParser(
+        prog="ctfctl.decoy", description="minimal unprivileged HTTP decoy"
+    )
     parser.add_argument("--serve", action="store_true", required=True)
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--bind", default="127.0.0.1")
@@ -565,8 +673,12 @@ def summarize(state: Dict[str, Any]) -> str:
     ]
     if not state.get("enabled"):
         lines.append("")
-        lines.append("The decoy is off. Read docs/decoy.md before enabling it: it must never")
-        lines.append("shadow a scored service, and its events are only an observation aid.")
+        lines.append(
+            "The decoy is off. Read docs/decoy.md before enabling it: it must never"
+        )
+        lines.append(
+            "shadow a scored service, and its events are only an observation aid."
+        )
     return "\n".join(lines)
 
 
