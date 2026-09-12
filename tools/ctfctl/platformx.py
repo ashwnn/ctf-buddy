@@ -25,6 +25,7 @@ TOOL_GROUPS: Dict[str, List[str]] = {
     "web": ["curl", "openssl"],
     "metadata": ["getfacl", "setfacl"],
     "app": ["nginx", "php", "gunicorn", "python3"],
+    "remote": ["ssh"],
 }
 
 TOOL_NOTES = {
@@ -47,6 +48,7 @@ TOOL_NOTES = {
     "php": "PHP syntax validation via php -l",
     "gunicorn": "Python WSGI service identification",
     "curl": "functional (tier 2/3) service checks",
+    "ssh": "remote mode transport (OpenSSH client)",
 }
 
 
@@ -132,7 +134,9 @@ def probe(quick: bool = False, system_root: str = "/") -> Capabilities:
         except OSError:
             caps.boot_id = ""
     if not caps.has_proc:
-        caps.limitations.append("no /proc: process, listener and unit mapping is unavailable")
+        caps.limitations.append(
+            "no /proc: process, listener and unit mapping is unavailable"
+        )
 
     caps.init_system, caps.init_detail = _detect_init(proc_path)
 
@@ -144,7 +148,9 @@ def probe(quick: bool = False, system_root: str = "/") -> Capabilities:
     except Exception as exc:  # pragma: no cover - defensive
         caps.fts5 = False
         caps.fts5_detail = f"sqlite3 import failed: {exc}"
-        caps.limitations.append("python sqlite3 module unavailable: knowledge-base index disabled")
+        caps.limitations.append(
+            "python sqlite3 module unavailable: knowledge-base index disabled"
+        )
 
     try:
         import fcntl  # noqa: F401
@@ -221,8 +227,9 @@ def _probe_fts5(sqlite3_module: Any) -> tuple:
             opts = [row[0] for row in conn.execute("PRAGMA compile_options")]
         except Exception:
             opts = []
-        return True, "fts5 available" + (f" ({', '.join(o for o in opts if 'FTS' in o)})"
-                                         if opts else "")
+        return True, "fts5 available" + (
+            f" ({', '.join(o for o in opts if 'FTS' in o)})" if opts else ""
+        )
     finally:
         conn.close()
 
@@ -254,8 +261,11 @@ def _probe_journal() -> bool:
     """Can we read another service's journal entries?"""
     if not util.which("journalctl"):
         return False
-    res = util.run(["journalctl", "-n", "1", "--no-pager", "--output", "cat"], timeout=8,
-                   max_output=8192)
+    res = util.run(
+        ["journalctl", "-n", "1", "--no-pager", "--output", "cat"],
+        timeout=8,
+        max_output=8192,
+    )
     return res.ok
 
 

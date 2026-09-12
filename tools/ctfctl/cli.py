@@ -13,9 +13,20 @@ import os
 import sys
 from typing import Any, Dict, List, Optional
 
-from . import __version__, apply as apply_mod, decoy as decoy_mod, discover as discover_mod
-from . import doctor as doctor_mod, kbindex, observe as observe_mod, plan as plan_mod
-from . import platformx, profiles as profiles_mod, sources_check, util
+from . import (
+    __version__,
+    apply as apply_mod,
+    decoy as decoy_mod,
+    discover as discover_mod,
+)
+from . import doctor as doctor_mod, files as files_mod, kbindex, observe as observe_mod
+from . import (
+    plan as plan_mod,
+    platformx,
+    profiles as profiles_mod,
+    remote as remote_mod,
+)
+from . import sources_check, util
 
 
 # --------------------------------------------------------------------------
@@ -23,7 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ctfctl",
         description="Offline-first preparation toolkit for a first-time CTF team "
-                    "(local fixtures and team-owned targets only)",
+        "(local fixtures and team-owned targets only)",
     )
     parser.add_argument("--version", action="version", version=f"ctfctl {__version__}")
     sub = parser.add_subparsers(dest="command")
@@ -36,49 +47,79 @@ def build_parser() -> argparse.ArgumentParser:
     # discover
     p = sub.add_parser("discover", help="read-only bounded host inventory")
     p.add_argument("--json", action="store_true")
-    p.add_argument("--system-root", default="/",
-                   help="read path-based evidence from a synthetic root (test fixtures)")
-    p.add_argument("--no-subprocess", action="store_true",
-                   help="skip every external command (deterministic, unprivileged)")
-    p.add_argument("--save", action="store_true", help="write the inventory under state/")
+    p.add_argument(
+        "--system-root",
+        default="/",
+        help="read path-based evidence from a synthetic root (test fixtures)",
+    )
+    p.add_argument(
+        "--no-subprocess",
+        action="store_true",
+        help="skip every external command (deterministic, unprivileged)",
+    )
+    p.add_argument(
+        "--save", action="store_true", help="write the inventory under state/"
+    )
     p.add_argument("--quick", action="store_true")
 
     # plan
     p = sub.add_parser("plan", help="detect stacks and propose exact, reviewed changes")
     p.add_argument("--profile", help="profile id (default: try every profile)")
-    p.add_argument("--inventory", help="use a saved inventory JSON instead of re-discovering")
+    p.add_argument(
+        "--inventory", help="use a saved inventory JSON instead of re-discovering"
+    )
     p.add_argument("--system-root", default="/")
     p.add_argument("--no-subprocess", action="store_true")
     p.add_argument("--json", action="store_true")
     p.add_argument("--verbose", action="store_true")
     p.add_argument("--no-save", action="store_true", help="do not persist the plan")
-    p.add_argument("--allow-fixture", action="store_true", default=True,
-                   help="fixture-local targets are always allowed (default)")
+    p.add_argument(
+        "--allow-fixture",
+        action="store_true",
+        default=True,
+        help="fixture-local targets are always allowed (default)",
+    )
 
     # apply
     p = sub.add_parser("apply", help="apply a reviewed plan (or run a tested profile)")
     p.add_argument("plan_id", nargs="?", default="latest")
-    p.add_argument("--yes", action="store_true", help="required for non-interactive apply")
-    p.add_argument("--approve-review", action="store_true",
-                   help="also apply review-only actions in the plan")
-    p.add_argument("--dry-run", action="store_true", help="validate everything, change nothing")
-    p.add_argument("--no-functional", action="store_true",
-                   help="skip tier-3 workflow verifiers (not recommended)")
+    p.add_argument(
+        "--yes", action="store_true", help="required for non-interactive apply"
+    )
+    p.add_argument(
+        "--approve-review",
+        action="store_true",
+        help="also apply review-only actions in the plan",
+    )
+    p.add_argument(
+        "--dry-run", action="store_true", help="validate everything, change nothing"
+    )
+    p.add_argument(
+        "--no-functional",
+        action="store_true",
+        help="skip tier-3 workflow verifiers (not recommended)",
+    )
     p.add_argument("--json", action="store_true")
 
     # verify
-    p = sub.add_parser("verify", help="run a plan's health checks and report degradation")
+    p = sub.add_parser(
+        "verify", help="run a plan's health checks and report degradation"
+    )
     p.add_argument("plan_id", nargs="?", default="latest")
     p.add_argument("--no-functional", action="store_true")
     p.add_argument("--json", action="store_true")
 
     # rollback / recover
-    p = sub.add_parser("rollback", help="revert one change batch with conflict detection")
+    p = sub.add_parser(
+        "rollback", help="revert one change batch with conflict detection"
+    )
     p.add_argument("tx_id", nargs="?")
     p.add_argument("--list", action="store_true")
     p.add_argument("--yes", action="store_true")
     p.add_argument("--json", action="store_true")
-    p = sub.add_parser("recover", help="inspect interrupted transactions (never guesses)")
+    p = sub.add_parser(
+        "recover", help="inspect interrupted transactions (never guesses)"
+    )
     p.add_argument("--json", action="store_true")
 
     # watch
@@ -91,15 +132,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-lines", type=int, default=500)
     p.add_argument("--include", help="only log lines matching this regex")
     p.add_argument("--exclude", help="drop log lines matching this regex")
-    p.add_argument("--count", type=int, default=500, help="packets per capture rotation")
+    p.add_argument(
+        "--count", type=int, default=500, help="packets per capture rotation"
+    )
     p.add_argument("--snaplen", type=int, default=256)
-    p.add_argument("--dry-run", action="store_true", help="print the capture command only")
+    p.add_argument(
+        "--dry-run", action="store_true", help="print the capture command only"
+    )
     p.add_argument("--json", action="store_true")
 
     # decoy
-    p = sub.add_parser("decoy", help="optional isolated HTTP decoy (disabled by default)")
+    p = sub.add_parser(
+        "decoy", help="optional isolated HTTP decoy (disabled by default)"
+    )
     decoy_sub = p.add_subparsers(dest="decoy_command")
-    d = decoy_sub.add_parser("enable", help="acknowledge rules and name unused ports/paths")
+    d = decoy_sub.add_parser(
+        "enable", help="acknowledge rules and name unused ports/paths"
+    )
     d.add_argument("--json", action="store_true")
     d.add_argument("--port", action="append", type=int, default=[])
     d.add_argument("--path", action="append", default=[])
@@ -142,16 +191,23 @@ def build_parser() -> argparse.ArgumentParser:
     k = kb_sub.add_parser("show", help="print one card (or its path) by id or path")
     k.add_argument("identifier")
     k.add_argument("--path-only", action="store_true")
-    k = kb_sub.add_parser("verify", help="validate manifests, index and source references")
+    k = kb_sub.add_parser(
+        "verify", help="validate manifests, index and source references"
+    )
     k.add_argument("--json", action="store_true")
     k = kb_sub.add_parser("stats", help="corpus counts and coverage")
     k.add_argument("--json", action="store_true")
     k = kb_sub.add_parser("export", help="write a shareable or local-event archive")
     k.add_argument("directory")
-    k.add_argument("--shareable", action="store_true",
-                   help="exclude snapshots whose licence does not permit redistribution")
+    k.add_argument(
+        "--shareable",
+        action="store_true",
+        help="exclude snapshots whose licence does not permit redistribution",
+    )
     k.add_argument("--json", action="store_true")
-    k = kb_sub.add_parser("open", help="print the local path of a search hit (for $EDITOR)")
+    k = kb_sub.add_parser(
+        "open", help="print the local path of a search hit (for $EDITOR)"
+    )
     k.add_argument("identifier")
 
     # profiles
@@ -167,14 +223,177 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true")
 
     # prep-online
-    p = sub.add_parser("prep-online",
-                       help="the ONLY command that may use the network (run before the event)")
-    p.add_argument("--check-sources", action="store_true",
-                   help="re-verify source URLs in sources/verified-index.jsonl")
-    p.add_argument("--all", action="store_true", help="re-check already verified sources")
-    p.add_argument("--require-tools", nargs="*", default=[],
-                   help="exit non-zero if these tools are missing")
+    p = sub.add_parser(
+        "prep-online",
+        help="the ONLY command that may use the network (run before the event)",
+    )
+    p.add_argument(
+        "--check-sources",
+        action="store_true",
+        help="re-verify source URLs in sources/verified-index.jsonl",
+    )
+    p.add_argument(
+        "--all", action="store_true", help="re-check already verified sources"
+    )
+    p.add_argument(
+        "--require-tools",
+        nargs="*",
+        default=[],
+        help="exit non-zero if these tools are missing",
+    )
     p.add_argument("--json", action="store_true")
+
+    # targets
+    p = sub.add_parser(
+        "targets", help="declare team-owned hosts (gates every mutation)"
+    )
+    tsub = p.add_subparsers(dest="targets_command")
+    t = tsub.add_parser(
+        "declare", help="declare one host as team-owned or event-authorized"
+    )
+    t.add_argument("host")
+    t.add_argument("--label", default="", help="what this host is, for the record")
+    t.add_argument(
+        "--role",
+        default="vulnbox",
+        choices=["vulnbox", "jumpbox", "practice", "other"],
+    )
+    t.add_argument("--notes", default="")
+    t.add_argument(
+        "--ack-policy",
+        action="store_true",
+        help="also acknowledge the event policy (required before remote apply)",
+    )
+    t.add_argument("--json", action="store_true")
+    t = tsub.add_parser("list", help="list declared targets and policy state")
+    t.add_argument("--json", action="store_true")
+    p.add_argument("--json", action="store_true")
+
+    # files (local, and the engine behind `remote files`)
+    p = sub.add_parser("files", help="bounded read-only filesystem exploration")
+    fsub = p.add_subparsers(dest="files_command")
+    f = fsub.add_parser("list", help="bounded directory listing")
+    f.add_argument("path")
+    f.add_argument(
+        "--depth",
+        type=int,
+        default=1,
+        help=f"1-{files_mod.MAX_DEPTH} levels (default 1)",
+    )
+    f.add_argument("--limit", type=int, default=files_mod.DEFAULT_LIMIT)
+    f.add_argument("--json", action="store_true")
+    f = fsub.add_parser("read", help="read a bounded, redacted head of one file")
+    f.add_argument("path")
+    f.add_argument("--max-bytes", type=int, default=files_mod.DEFAULT_READ_BYTES)
+    f.add_argument(
+        "--no-redact",
+        action="store_true",
+        help="debugging only: do not scrub secret-looking values",
+    )
+    f.add_argument("--json", action="store_true")
+    f = fsub.add_parser("find", help="bounded filename search")
+    f.add_argument("path")
+    f.add_argument("--name", required=True, help="shell-style glob, e.g. '*.py'")
+    f.add_argument("--limit", type=int, default=files_mod.DEFAULT_LIMIT)
+    f.add_argument("--max-depth", type=int, default=files_mod.MAX_DEPTH)
+    f.add_argument("--json", action="store_true")
+    p.add_argument("--json", action="store_true")
+
+    # remote
+    p = sub.add_parser("remote", help="operate on a declared team-owned host over ssh")
+    rsub = p.add_subparsers(dest="remote_command")
+
+    def connection_options(sp: argparse.ArgumentParser) -> None:
+        sp.add_argument("--port", type=int, help="ssh port (or use host:port)")
+        sp.add_argument("--user", default="", help="ssh user (or use user@host)")
+        sp.add_argument("--identity", default="", help="private key for ssh -i")
+        sp.add_argument(
+            "--timeout",
+            type=float,
+            default=None,
+            help="per-ssh-call timeout in seconds",
+        )
+
+    r = rsub.add_parser(
+        "probe", help="read-only host inventory (needs no remote python)"
+    )
+    r.add_argument("host")
+    connection_options(r)
+    r.add_argument(
+        "--save", action="store_true", help="save the parsed probe under state/"
+    )
+    r.add_argument(
+        "--keep-raw",
+        action="store_true",
+        help="also save the redacted raw probe output under state/",
+    )
+    r.add_argument("--json", action="store_true")
+
+    r = rsub.add_parser("install", help="upload the read-only toolkit to ~/.ctfctl")
+    r.add_argument("host")
+    connection_options(r)
+    r.add_argument("--force", action="store_true", help="re-upload even if current")
+    r.add_argument("--json", action="store_true")
+
+    r = rsub.add_parser(
+        "plan", help="detect stacks on the host and pull the exact plan"
+    )
+    r.add_argument("host")
+    connection_options(r)
+    r.add_argument("--profile", help="limit to one profile id")
+    r.add_argument("--verbose", action="store_true", help="show full diffs")
+    r.add_argument("--json", action="store_true")
+
+    r = rsub.add_parser("apply", help="apply a reviewed plan on the host")
+    r.add_argument("host")
+    r.add_argument("plan_id", nargs="?", default="latest")
+    connection_options(r)
+    r.add_argument("--yes", action="store_true", help="required for a real apply")
+    r.add_argument("--dry-run", action="store_true")
+    r.add_argument("--approve-review", action="store_true")
+    r.add_argument("--no-functional", action="store_true")
+    r.add_argument("--json", action="store_true")
+
+    r = rsub.add_parser("verify", help="run the plan's health checks on the host")
+    r.add_argument("host")
+    r.add_argument("plan_id", nargs="?", default="latest")
+    connection_options(r)
+    r.add_argument("--no-functional", action="store_true")
+    r.add_argument("--json", action="store_true")
+
+    r = rsub.add_parser("rollback", help="revert one change batch on the host")
+    r.add_argument("host")
+    connection_options(r)
+    r.add_argument("--tx", dest="tx_id", help="transaction id (omit for --list)")
+    r.add_argument("--list", action="store_true")
+    r.add_argument("--yes", action="store_true", help="required for a real rollback")
+    r.add_argument("--json", action="store_true")
+
+    r = rsub.add_parser("recover", help="inspect interrupted remote transactions")
+    r.add_argument("host")
+    connection_options(r)
+    r.add_argument("--json", action="store_true")
+
+    r = rsub.add_parser("run", help="proxy one allowlisted read-only subcommand")
+    r.add_argument("host")
+    connection_options(r)
+    r.add_argument(
+        "args",
+        nargs=argparse.REMAINDER,
+        help="e.g. doctor --json; mutations must use remote apply/rollback",
+    )
+
+    r = rsub.add_parser("files", help="bounded read-only file exploration on the host")
+    r.add_argument("host")
+    connection_options(r)
+    r.add_argument("files_action", choices=["list", "read", "find"])
+    r.add_argument("path")
+    r.add_argument("--depth", type=int, default=1)
+    r.add_argument("--limit", type=int, default=files_mod.DEFAULT_LIMIT)
+    r.add_argument("--name", default="", help="glob for the find action")
+    r.add_argument("--max-bytes", type=int, default=files_mod.DEFAULT_READ_BYTES)
+    r.add_argument("--max-depth", type=int, default=files_mod.MAX_DEPTH)
+    r.add_argument("--json", action="store_true")
 
     return parser
 
@@ -202,9 +421,14 @@ def cmd_discover(args: argparse.Namespace) -> int:
         directory = util.state_dir(root=util.repo_root())
         path = os.path.join(directory, f"inventory-{util.utc_stamp()}.json")
         util.write_text_atomic(path, util.dump_json(payload), mode=0o600)
-        util.write_text_atomic(os.path.join(directory, "inventory-latest.json"),
-                               util.dump_json(payload), mode=0o600)
-        payload["saved_to"] = os.path.relpath(path, util.repo_root()).replace(os.sep, "/")
+        util.write_text_atomic(
+            os.path.join(directory, "inventory-latest.json"),
+            util.dump_json(payload),
+            mode=0o600,
+        )
+        payload["saved_to"] = os.path.relpath(path, util.repo_root()).replace(
+            os.sep, "/"
+        )
     if args.json:
         util.emit_json(payload)
     else:
@@ -220,7 +444,9 @@ def _load_inventory(args: argparse.Namespace) -> Dict[str, Any]:
         if payload is None:
             raise util.UsageError(f"inventory file not readable: {args.inventory}")
         return payload
-    latest = os.path.join(util.state_dir(root=util.repo_root()), "inventory-latest.json")
+    latest = os.path.join(
+        util.state_dir(root=util.repo_root()), "inventory-latest.json"
+    )
     if getattr(args, "use_latest", False) and os.path.isfile(latest):
         return util.load_json(latest, {})
     inventory = discover_mod.discover(
@@ -238,7 +464,9 @@ def cmd_plan(args: argparse.Namespace) -> int:
     else:
         chosen = profiles_mod.load_all()
     if not chosen:
-        raise util.CtfError("no profiles are installed", hint="check the profiles/ directory")
+        raise util.CtfError(
+            "no profiles are installed", hint="check the profiles/ directory"
+        )
     plans: List[plan_mod.Plan] = []
     for profile in chosen:
         plan = plan_mod.build_plan(profile, inventory, allow_fixture=args.allow_fixture)
@@ -249,11 +477,13 @@ def cmd_plan(args: argparse.Namespace) -> int:
             if plan.detection.get("matched"):
                 plan.save()
     if args.json:
-        util.emit_json({
-            "inventory_digest": plans[0].inventory_digest if plans else "",
-            "plans": [p.as_dict() for p in plans],
-            "matched": [p.profile_id for p in matched],
-        })
+        util.emit_json(
+            {
+                "inventory_digest": plans[0].inventory_digest if plans else "",
+                "plans": [p.as_dict() for p in plans],
+                "matched": [p.profile_id for p in matched],
+            }
+        )
     else:
         for index, plan in enumerate(plans):
             if index:
@@ -265,8 +495,10 @@ def cmd_plan(args: argparse.Namespace) -> int:
                 for reason in plan.detection.get("reasons", []):
                     print(f"  - {util.printable(reason, 200)}")
         if not matched:
-            print("\nNo profile matched this host. That is a normal outcome for an unfamiliar "
-                  "service: discovery evidence is above, and no mutation is proposed.")
+            print(
+                "\nNo profile matched this host. That is a normal outcome for an unfamiliar "
+                "service: discovery evidence is above, and no mutation is proposed."
+            )
     return util.EXIT_OK if matched else util.EXIT_NEGATIVE
 
 
@@ -282,36 +514,58 @@ def cmd_apply(args: argparse.Namespace) -> int:
             "refusing to mutate without --yes",
             hint="read the plan first: ctfctl plan --verbose, then ctfctl apply --yes",
         )
-    tx = apply_mod.apply_plan(plan, yes=args.yes, include_review=args.approve_review,
-                              dry_run=args.dry_run, functional=not args.no_functional)
+    tx = apply_mod.apply_plan(
+        plan,
+        yes=args.yes,
+        include_review=args.approve_review,
+        dry_run=args.dry_run,
+        functional=not args.no_functional,
+    )
     payload = {
         "tx_id": tx.tx_id,
         "phase": tx.phase,
         "dry_run": tx.dry_run,
         "plan": plan.plan_id,
-        "files": [{"path": c.path, "pre": c.pre_sha256[:12], "post": c.post_sha256[:12],
-                   "replaced": c.replaced} for c in tx.changes],
+        "files": [
+            {
+                "path": c.path,
+                "pre": c.pre_sha256[:12],
+                "post": c.post_sha256[:12],
+                "replaced": c.replaced,
+            }
+            for c in tx.changes
+        ],
         "effects": tx.effects_run,
         "verification": tx.verification,
         "errors": tx.errors,
-        "journal": os.path.relpath(tx.journal_path, util.repo_root()).replace(os.sep, "/"),
+        "journal": os.path.relpath(tx.journal_path, util.repo_root()).replace(
+            os.sep, "/"
+        ),
     }
     if args.json:
         util.emit_json(payload)
     else:
-        print(f"transaction {tx.tx_id}  phase={tx.phase}"
-              + ("  (dry run: nothing was changed)" if tx.dry_run else ""))
+        print(
+            f"transaction {tx.tx_id}  phase={tx.phase}"
+            + ("  (dry run: nothing was changed)" if tx.dry_run else "")
+        )
         for change in tx.changes:
-            print(f"  file {change.path}  {change.pre_sha256[:12]} -> "
-                  f"{change.post_sha256[:12] or '(unchanged)'}")
+            print(
+                f"  file {change.path}  {change.pre_sha256[:12]} -> "
+                f"{change.post_sha256[:12] or '(unchanged)'}"
+            )
         for effect in tx.effects_run:
             print(f"  effect {' '.join(effect['argv'])} -> ok={effect['ok']}")
         for result in tx.verification:
-            print(f"  verify {'ok  ' if result.get('ok') else 'FAIL'} "
-                  f"[{result.get('tier')}] {result.get('verifier')}: "
-                  f"{util.printable(str(result.get('detail')), 160)}")
+            print(
+                f"  verify {'ok  ' if result.get('ok') else 'FAIL'} "
+                f"[{result.get('tier')}] {result.get('verifier')}: "
+                f"{util.printable(str(result.get('detail')), 160)}"
+            )
         if tx.dry_run:
-            print("dry run complete: all preconditions, candidates and validations passed")
+            print(
+                "dry run complete: all preconditions, candidates and validations passed"
+            )
         else:
             print(f"\nrollback with: ctfctl rollback {tx.tx_id}")
     return util.EXIT_OK
@@ -326,11 +580,15 @@ def cmd_verify(args: argparse.Namespace) -> int:
     else:
         print(f"verification of {plan.profile_id} (plan {plan.plan_id})")
         for result in results:
-            print(f"  {'ok  ' if result.get('ok') else 'FAIL'} [{result.get('tier')}] "
-                  f"{result.get('verifier')}: {util.printable(str(result.get('detail')), 200)}")
+            print(
+                f"  {'ok  ' if result.get('ok') else 'FAIL'} [{result.get('tier')}] "
+                f"{result.get('verifier')}: {util.printable(str(result.get('detail')), 200)}"
+            )
         print()
-        print("These are OUR checks, not the organiser checker. A pass means the legitimate "
-              "workflow still works and the known exploit probe no longer does.")
+        print(
+            "These are OUR checks, not the organiser checker. A pass means the legitimate "
+            "workflow still works and the known exploit probe no longer does."
+        )
     return util.EXIT_OK if ok else util.EXIT_NEGATIVE
 
 
@@ -343,14 +601,18 @@ def cmd_rollback(args: argparse.Namespace) -> int:
             if not entries:
                 print("no transactions recorded")
             for entry in entries:
-                print(f"{entry['tx_id']}  {entry['phase']:<12} {entry['started_at']}  "
-                      f"{len(entry['files'])} file(s)")
+                print(
+                    f"{entry['tx_id']}  {entry['phase']:<12} {entry['started_at']}  "
+                    f"{len(entry['files'])} file(s)"
+                )
                 for error in entry.get("errors") or []:
                     print(f"    ! {util.printable(str(error), 160)}")
         return util.EXIT_OK
     if not args.yes:
-        raise util.CtfError("refusing to roll back without --yes",
-                            hint=f"ctfctl rollback {args.tx_id} --yes")
+        raise util.CtfError(
+            "refusing to roll back without --yes",
+            hint=f"ctfctl rollback {args.tx_id} --yes",
+        )
     tx = apply_mod.rollback_tx(args.tx_id, yes=args.yes)
     payload = {
         "tx_id": tx.tx_id,
@@ -372,17 +634,25 @@ def cmd_rollback(args: argparse.Namespace) -> int:
         for effect in [e for e in tx.effects_run if e.get("phase") == "rollback"]:
             print(f"  effect {' '.join(effect['argv'])} -> ok={effect['ok']}")
         if tx.verification:
-            print("  post-rollback state check (the pre-patch state is expected here, so the")
-            print("  negative exploit probe should FAIL again — that means the rollback worked):")
+            print(
+                "  post-rollback state check (the pre-patch state is expected here, so the"
+            )
+            print(
+                "  negative exploit probe should FAIL again — that means the rollback worked):"
+            )
         for result in tx.verification:
-            print(f"  verify {'ok  ' if result.get('ok') else 'FAIL'} "
-                  f"[{result.get('tier')}] {result.get('verifier')}: "
-                  f"{util.printable(str(result.get('detail')), 160)}")
+            print(
+                f"  verify {'ok  ' if result.get('ok') else 'FAIL'} "
+                f"[{result.get('tier')}] {result.get('verifier')}: "
+                f"{util.printable(str(result.get('detail')), 160)}"
+            )
         for error in tx.errors:
             print(f"  ! {util.printable(str(error), 200)}")
         if tx.phase == "CONFLICTED":
-            print("\nA file changed after the transaction, so it was left alone. "
-                  "Resolve the difference by hand; nothing was overwritten.")
+            print(
+                "\nA file changed after the transaction, so it was left alone. "
+                "Resolve the difference by hand; nothing was overwritten."
+            )
     return util.EXIT_OK if tx.phase == "ROLLED_BACK" else util.EXIT_NEGATIVE
 
 
@@ -426,24 +696,36 @@ def cmd_watch(args: argparse.Namespace) -> int:
 def cmd_decoy(args: argparse.Namespace) -> int:
     command = args.decoy_command or "status"
     if command == "enable":
-        policy = decoy_mod.enable(util.repo_root(), ports=list(args.port), paths=list(args.path),
-                                  bind=args.bind, notes=args.notes,
-                                  acknowledge=args.ack_rules)
+        policy = decoy_mod.enable(
+            util.repo_root(),
+            ports=list(args.port),
+            paths=list(args.path),
+            bind=args.bind,
+            notes=args.notes,
+            acknowledge=args.ack_rules,
+        )
         payload = policy.as_dict()
         if args.json:
             util.emit_json(payload)
         else:
-            print("decoy enabled for ports " + ", ".join(str(p) for p in policy.allowed_ports))
+            print(
+                "decoy enabled for ports "
+                + ", ".join(str(p) for p in policy.allowed_ports)
+            )
             print("paths: " + ", ".join(policy.allowed_paths))
-            print("Reminder: a decoy is an observation aid. It must never shadow a scored "
-                  "service and it does not replace log review.")
+            print(
+                "Reminder: a decoy is an observation aid. It must never shadow a scored "
+                "service and it does not replace log review."
+            )
         return util.EXIT_OK
     if command == "start":
         state = decoy_mod.start(util.repo_root(), port=args.port, bind=args.bind)
         if args.json:
             util.emit_json(state)
         else:
-            print(f"decoy started pid={state['pid']} on {state['bind']}:{state['port']}")
+            print(
+                f"decoy started pid={state['pid']} on {state['bind']}:{state['port']}"
+            )
             print(f"events -> {state['log_path']}")
         return util.EXIT_OK
     if command == "stop":
@@ -451,8 +733,10 @@ def cmd_decoy(args: argparse.Namespace) -> int:
         if args.json:
             util.emit_json(result)
         else:
-            print(f"stopped={result.get('stopped')} verified_port_released="
-                  f"{result.get('verified')}")
+            print(
+                f"stopped={result.get('stopped')} verified_port_released="
+                f"{result.get('verified')}"
+            )
         return util.EXIT_OK if result.get("verified") else util.EXIT_NEGATIVE
     state = decoy_mod.status(util.repo_root())
     if args.json:
@@ -460,6 +744,264 @@ def cmd_decoy(args: argparse.Namespace) -> int:
     else:
         print(decoy_mod.summarize(state))
     return util.EXIT_OK
+
+
+def cmd_targets(args: argparse.Namespace) -> int:
+    command = args.targets_command or "list"
+    if command == "declare":
+        result = remote_mod.declare_target(
+            args.host,
+            label=args.label,
+            role=args.role,
+            notes=args.notes,
+            ack_policy=args.ack_policy,
+        )
+        if args.json:
+            util.emit_json(result)
+        else:
+            action = "updated" if result.get("replaced") else "declared"
+            print(f"{action} target {result['host']}  label={result['label']}")
+            print(f"targets file        {result['targets_file']}")
+            print(f"policy acknowledged {result['policy_acknowledged']}")
+            if not result["policy_acknowledged"]:
+                print(
+                    "Mutating actions stay blocked until the event policy is acknowledged: "
+                    f"re-run with --ack-policy once the rules are confirmed."
+                )
+        return util.EXIT_OK
+    targets = remote_mod.load_targets()
+    payload = {
+        "targets": targets,
+        "policy_acknowledged": remote_mod.is_policy_acknowledged(),
+        "targets_file": remote_mod.TARGETS_REL,
+        "policy_file": remote_mod.POLICY_REL,
+    }
+    if args.json:
+        util.emit_json(payload)
+    else:
+        if not targets:
+            print(
+                "no targets declared. Read-only local work needs none; remote work does:\n"
+                "  ctfctl targets declare <host> --label '<what it is>' [--ack-policy]"
+            )
+        for item in targets:
+            print(
+                f"{item.get('host', '?'):<40} {item.get('role', '?'):<10} "
+                f"{item.get('label', '')}"
+            )
+        print(f"policy acknowledged: {payload['policy_acknowledged']}")
+    return util.EXIT_OK
+
+
+def cmd_files(args: argparse.Namespace) -> int:
+    command = args.files_command or "list"
+    # Local use allows relative paths; they are resolved here so the same
+    # exploration code always sees a clean absolute path.
+    local_path = files_mod.resolve_local_path(args.path)
+    if command == "list":
+        payload = files_mod.list_dir(local_path, depth=args.depth, limit=args.limit)
+        if args.json:
+            util.emit_json(payload)
+        else:
+            print(files_mod.render_listing(payload))
+        return util.EXIT_OK
+    if command == "read":
+        payload = files_mod.read_file(
+            local_path, max_bytes=args.max_bytes, redact=not args.no_redact
+        )
+        if args.json:
+            util.emit_json(payload)
+        else:
+            print(files_mod.render_read(payload))
+        return util.EXIT_OK
+    if command == "find":
+        payload = files_mod.find_files(
+            local_path,
+            name=args.name,
+            limit=args.limit,
+            max_depth=args.max_depth,
+        )
+        if args.json:
+            util.emit_json(payload)
+        else:
+            print(files_mod.render_matches(payload))
+        return util.EXIT_OK
+    raise util.UsageError(f"unknown files action {command!r}")
+
+
+def _remote_conn(args: argparse.Namespace) -> remote_mod.Conn:
+    conn = remote_mod.parse_host(
+        args.host,
+        user=getattr(args, "user", "") or "",
+        port=getattr(args, "port", None),
+    )
+    if getattr(args, "identity", ""):
+        conn.identity = args.identity
+    if getattr(args, "timeout", None):
+        conn.timeout = args.timeout
+    return conn
+
+
+def cmd_remote(args: argparse.Namespace) -> int:
+    command = args.remote_command
+    if not command:
+        raise util.UsageError(
+            "remote needs a subcommand",
+            hint="try: ctfctl remote probe <host>",
+        )
+    conn = _remote_conn(args)
+    if command == "probe":
+        payload = remote_mod.probe(conn, save=args.save, keep_raw=args.keep_raw)
+        if args.json:
+            util.emit_json(payload)
+        else:
+            print(remote_mod.summarize_probe(payload))
+            if payload.get("saved_to"):
+                print(f"\nsaved   {payload['saved_to']}")
+        return util.EXIT_OK
+    if command == "install":
+        payload = remote_mod.install(conn, force=args.force)
+        if args.json:
+            util.emit_json(payload)
+        else:
+            if payload.get("installed"):
+                print(
+                    f"uploaded toolkit {payload['fingerprint']} to "
+                    f"~/.ctfctl on {conn.target}"
+                )
+            else:
+                print(f"toolkit on {conn.target} is current ({payload['fingerprint']})")
+        return util.EXIT_OK
+    if command == "plan":
+        payload = remote_mod.plan(conn, profile=args.profile)
+        matched = [
+            p for p in payload.get("plans", []) if p.get("detection", {}).get("matched")
+        ]
+        if args.json:
+            util.emit_json(payload)
+        else:
+            remote_meta = payload.get("remote", {})
+            print(
+                f"host {conn.target}: toolkit={remote_meta.get('toolkit', '?')} "
+                f"uploaded={remote_meta.get('installed')} "
+                f"authorization_mirrored={remote_meta.get('authorization_mirrored')} "
+                f"policy_acknowledged={remote_meta.get('policy_acknowledged')}"
+            )
+            if not matched:
+                print(
+                    "\nNo profile matched this host. That is a normal outcome for an "
+                    "unfamiliar service: the probe evidence is the deliverable, and no "
+                    "mutation is proposed."
+                )
+            for entry in matched:
+                print()
+                print(remote_mod.render_plan(entry, verbose=args.verbose))
+        return util.EXIT_OK if matched else util.EXIT_NEGATIVE
+    if command == "apply":
+        code, payload = remote_mod.apply(
+            conn,
+            args.plan_id,
+            yes=args.yes,
+            dry_run=args.dry_run,
+            approve_review=args.approve_review,
+            no_functional=args.no_functional,
+        )
+        if args.json:
+            util.emit_json(payload)
+        else:
+            print(_render_apply(payload))
+        return code
+    if command == "verify":
+        code, payload = remote_mod.verify(
+            conn, args.plan_id, no_functional=args.no_functional
+        )
+        if args.json:
+            util.emit_json(payload)
+        else:
+            results = payload.get("verification") or payload.get("results") or []
+            if not results and "error" in payload:
+                print(f"verify failed: {payload['error']}")
+            for item in results:
+                state = "ok  " if item.get("ok") else "FAIL"
+                print(
+                    f"{state} [{item.get('tier', '?')}] {item.get('verifier', '?')}: "
+                    f"{item.get('detail', '')}"
+                )
+            if not results and payload.get("ok"):
+                print("verify ok")
+        return code
+    if command == "rollback":
+        code, payload = remote_mod.rollback(
+            conn, tx_id=args.tx_id, list_only=args.list, yes=args.yes
+        )
+        if args.json:
+            util.emit_json(payload)
+        else:
+            transactions = payload.get("transactions") or payload.get("results") or []
+            if not transactions and "error" in payload:
+                print(f"rollback failed: {payload['error']}")
+            for item in transactions:
+                print(
+                    f"{item.get('tx_id', '?')}  phase={item.get('phase', '?')}  "
+                    f"files={len(item.get('files') or [])}"
+                )
+            if payload.get("rolled_back"):
+                print("rolled back")
+        return code
+    if command == "recover":
+        code, payload = remote_mod.recover(conn)
+        if args.json:
+            util.emit_json(payload)
+        else:
+            findings = payload.get("findings") or payload.get("transactions") or []
+            if not findings:
+                print("no interrupted remote transactions")
+            for item in findings:
+                print(
+                    f"{item.get('tx_id', '?')}  phase={item.get('phase', '?')}  "
+                    f"next: {item.get('requires', 'review')}"
+                )
+        return code
+    if command == "run":
+        return remote_mod.run_read_only(conn, list(args.args))
+    if command == "files":
+        return remote_mod.remote_files(
+            conn,
+            args.files_action,
+            args.path,
+            depth=args.depth,
+            limit=args.limit,
+            name=args.name,
+            max_bytes=args.max_bytes,
+            max_depth=args.max_depth,
+            as_json=args.json,
+        )
+    raise util.UsageError(f"unknown remote subcommand {command!r}")
+
+
+def _render_apply(payload: dict) -> str:
+    if payload.get("error"):
+        return f"apply refused: {payload['error']}"
+    lines = [
+        f"tx          {payload.get('tx_id', '?')}",
+        f"phase       {payload.get('phase', '?')}",
+        f"plan        {payload.get('plan', '?')}",
+    ]
+    for item in payload.get("files", []):
+        replaced = "replaced" if item.get("replaced") else "unchanged"
+        lines.append(
+            f"  file      {item.get('path', '?')}  "
+            f"{item.get('pre', '')[:12]} -> {item.get('post', '')[:12]}  {replaced}"
+        )
+    for item in payload.get("verification", []):
+        state = "ok  " if item.get("ok") else "FAIL"
+        lines.append(
+            f"  check     {state} [{item.get('tier', '?')}] {item.get('verifier', '?')}: "
+            f"{item.get('detail', '')}"
+        )
+    for error in payload.get("errors", []):
+        lines.append(f"  error     {error}")
+    return "\n".join(lines)
 
 
 def cmd_kb(args: argparse.Namespace) -> int:
@@ -470,8 +1012,10 @@ def cmd_kb(args: argparse.Namespace) -> int:
         if args.json:
             util.emit_json(payload)
         else:
-            print(f"index {stats.mode}: added={stats.added} updated={stats.updated} "
-                  f"deleted={stats.deleted} unchanged={stats.unchanged} total={stats.total}")
+            print(
+                f"index {stats.mode}: added={stats.added} updated={stats.updated} "
+                f"deleted={stats.deleted} unchanged={stats.unchanged} total={stats.total}"
+            )
             print(f"fts5={'yes' if stats.fts5 else 'NO (literal fallback only)'}")
             for warning in stats.warnings:
                 print(f"  ! {warning}")
@@ -481,8 +1025,14 @@ def cmd_kb(args: argparse.Namespace) -> int:
         if args.fts:
             mode = "raw"
         try:
-            hits = kbindex.search(args.query, mode=mode, tag=args.tag, stack=args.stack,
-                                  limit=args.limit, kind=args.kind)
+            hits = kbindex.search(
+                args.query,
+                mode=mode,
+                tag=args.tag,
+                stack=args.stack,
+                limit=args.limit,
+                kind=args.kind,
+            )
         except util.CtfError as exc:
             if not args.json:
                 util.eprint(f"ERROR query: {exc}")
@@ -493,8 +1043,13 @@ def cmd_kb(args: argparse.Namespace) -> int:
             return util.EXIT_NEGATIVE
         return _emit_hits(hits, args.json)
     if command == "literal":
-        hits = kbindex.literal(args.pattern, tag=args.tag, stack=args.stack, limit=args.limit,
-                               fixed=not args.regex)
+        hits = kbindex.literal(
+            args.pattern,
+            tag=args.tag,
+            stack=args.stack,
+            limit=args.limit,
+            fixed=not args.regex,
+        )
         return _emit_hits(hits, args.json)
     if command == "show":
         return _show_document(args.identifier, args.path_only)
@@ -505,7 +1060,9 @@ def cmd_kb(args: argparse.Namespace) -> int:
         else:
             print(f"knowledge base verify: {'OK' if report['ok'] else 'PROBLEMS'}")
             for check in report["checks"]:
-                print(f"  {'ok  ' if check['ok'] else 'FAIL'} {check['name']}: {check['detail']}")
+                print(
+                    f"  {'ok  ' if check['ok'] else 'FAIL'} {check['name']}: {check['detail']}"
+                )
             for warning in report["warnings"]:
                 print(f"  warn {warning}")
         return util.EXIT_OK if report["ok"] else util.EXIT_NEGATIVE
@@ -514,12 +1071,24 @@ def cmd_kb(args: argparse.Namespace) -> int:
         if args.json:
             util.emit_json(data)
         else:
-            print(f"cards      {data['cards_on_disk']} on disk / {data['cards_manifest']} in manifest")
-            print(f"sources    {data['sources_total']} total, {data['sources_primary']} primary, "
-                  f"{data['teams_organizers']} teams/organizers")
-            print(f"index      {data['index']['path']} exists={data['index']['exists']}")
-            print("tags       " + ", ".join(f"{k}({v})" for k, v in list(data["tags"].items())[:12]))
-            print("stacks     " + ", ".join(f"{k}({v})" for k, v in list(data["stacks"].items())[:12]))
+            print(
+                f"cards      {data['cards_on_disk']} on disk / {data['cards_manifest']} in manifest"
+            )
+            print(
+                f"sources    {data['sources_total']} total, {data['sources_primary']} primary, "
+                f"{data['teams_organizers']} teams/organizers"
+            )
+            print(
+                f"index      {data['index']['path']} exists={data['index']['exists']}"
+            )
+            print(
+                "tags       "
+                + ", ".join(f"{k}({v})" for k, v in list(data["tags"].items())[:12])
+            )
+            print(
+                "stacks     "
+                + ", ".join(f"{k}({v})" for k, v in list(data["stacks"].items())[:12])
+            )
         return util.EXIT_OK
     if command == "export":
         return _export(args)
@@ -534,8 +1103,10 @@ def _emit_hits(hits: List[kbindex.Hit], as_json: bool) -> int:
         return util.EXIT_OK if hits else util.EXIT_NEGATIVE
     if not hits:
         print("no matches")
-        print("hint: try `ctfctl kb literal <text>` for exact code/error strings, or "
-              "`ctfctl kb index` if the index is missing.")
+        print(
+            "hint: try `ctfctl kb literal <text>` for exact code/error strings, or "
+            "`ctfctl kb index` if the index is missing."
+        )
         return util.EXIT_NEGATIVE
     for hit in hits:
         location = hit.path + (f":{hit.line}" if hit.line else "")
@@ -586,13 +1157,25 @@ def _export(args: argparse.Namespace) -> int:
         if os.path.isfile(source):
             shutil.copy2(source, os.path.join(destination, relative))
             copied.append(relative)
-    for relative in ("kb", "docs", "tools", "profiles", "fixtures", "tests", "drills", "research"):
+    for relative in (
+        "kb",
+        "docs",
+        "tools",
+        "profiles",
+        "fixtures",
+        "tests",
+        "drills",
+        "research",
+    ):
         source = os.path.join(root, relative)
         if not os.path.isdir(source):
             continue
         target = os.path.join(destination, relative)
-        shutil.copytree(source, target,
-                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.sqlite3"))
+        shutil.copytree(
+            source,
+            target,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.sqlite3"),
+        )
         copied.append(relative + "/")
     sources_dir = os.path.join(destination, "sources")
     os.makedirs(sources_dir, exist_ok=True)
@@ -610,9 +1193,15 @@ def _export(args: argparse.Namespace) -> int:
             for name in sorted(filenames):
                 absolute = os.path.join(dirpath, name)
                 relative = os.path.relpath(absolute, root).replace(os.sep, "/")
-                record = next((r for r in manifest_lines
-                               if str(r.get("local_path") or "").replace(os.sep, "/") == relative),
-                              None)
+                record = next(
+                    (
+                        r
+                        for r in manifest_lines
+                        if str(r.get("local_path") or "").replace(os.sep, "/")
+                        == relative
+                    ),
+                    None,
+                )
                 policy = (record or {}).get("redistribution", "unknown")
                 if args.shareable and policy not in allowed_policy:
                     excluded.append({"path": relative, "redistribution": policy})
@@ -626,12 +1215,15 @@ def _export(args: argparse.Namespace) -> int:
         "shareable": bool(args.shareable),
         "copied": copied,
         "excluded_snapshots": excluded,
-        "note": ("shareable export excludes any stored snapshot whose redistribution policy is "
-                 "not 'allowed' or 'allowed-with-attribution'. Runtime state, captures, index "
-                 "and plans are never exported."),
+        "note": (
+            "shareable export excludes any stored snapshot whose redistribution policy is "
+            "not 'allowed' or 'allowed-with-attribution'. Runtime state, captures, index "
+            "and plans are never exported."
+        ),
     }
-    util.write_text_atomic(os.path.join(destination, "EXPORT.json"),
-                           util.dump_json(payload), mode=0o644)
+    util.write_text_atomic(
+        os.path.join(destination, "EXPORT.json"), util.dump_json(payload), mode=0o644
+    )
     if args.json:
         util.emit_json(payload)
     else:
@@ -649,17 +1241,26 @@ def cmd_profiles(args: argparse.Namespace) -> int:
             util.emit_json({"profiles": entries})
         else:
             for profile in entries:
-                print(f"{profile['profile_id']:<32} {profile['support_level']:<20} "
-                      f"{profile['title']}")
-                auto = [k for k, v in profile["actions"].items()
-                        if str(v.get("eligibility")) == "auto"]
-                print(f"  scope={profile['scope']}  actions={len(profile['actions'])} "
-                      f"auto={auto or 'none'}")
+                print(
+                    f"{profile['profile_id']:<32} {profile['support_level']:<20} "
+                    f"{profile['title']}"
+                )
+                auto = [
+                    k
+                    for k, v in profile["actions"].items()
+                    if str(v.get("eligibility")) == "auto"
+                ]
+                print(
+                    f"  scope={profile['scope']}  actions={len(profile['actions'])} "
+                    f"auto={auto or 'none'}"
+                )
         return util.EXIT_OK
     if command == "show":
         profile = profiles_mod.load(args.profile_id)
         if args.json:
-            util.emit_json({**profile.as_dict(), "problems": profiles_mod.validate(profile)})
+            util.emit_json(
+                {**profile.as_dict(), "problems": profiles_mod.validate(profile)}
+            )
         else:
             print(util.dump_json(profile.as_dict()))
             problems = profiles_mod.validate(profile)
@@ -672,8 +1273,9 @@ def cmd_profiles(args: argparse.Namespace) -> int:
             for problem in profiles_mod.validate(profile):
                 problems.append(f"{profile.profile_id}: {problem}")
         if args.json:
-            util.emit_json({"valid": not problems, "problems": problems,
-                            "count": len(profiles)})
+            util.emit_json(
+                {"valid": not problems, "problems": problems, "count": len(profiles)}
+            )
         else:
             print(f"profiles validated: {len(profiles)}")
             for problem in problems:
@@ -691,12 +1293,20 @@ def cmd_prep_online(args: argparse.Namespace) -> int:
     if args.check_sources:
         if not os.path.isfile(index_path):
             raise util.CtfError(f"no source index at {index_path}")
-        records, summary = sources_check.check_manifest(index_path, only_missing=not args.all)
+        records, summary = sources_check.check_manifest(
+            index_path, only_missing=not args.all
+        )
         sources_check.write_index(index_path, records)
-        results["steps"].append({"step": "check-sources", "summary": summary,
-                                 "verified": sum(1 for r in records if r.get("verified")),
-                                 "failed": [r.get("source_id") for r in records
-                                            if not r.get("verified")]})
+        results["steps"].append(
+            {
+                "step": "check-sources",
+                "summary": summary,
+                "verified": sum(1 for r in records if r.get("verified")),
+                "failed": [
+                    r.get("source_id") for r in records if not r.get("verified")
+                ],
+            }
+        )
     caps = platformx.probe()
     missing = [tool for tool in (args.require_tools or []) if not caps.tools.get(tool)]
     results["tools"] = {"required": list(args.require_tools or []), "missing": missing}
@@ -747,6 +1357,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         "kb": cmd_kb,
         "profiles": cmd_profiles,
         "prep-online": cmd_prep_online,
+        "targets": cmd_targets,
+        "files": cmd_files,
+        "remote": cmd_remote,
     }
     handler = handlers[args.command]
     try:
@@ -762,7 +1375,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         if os.environ.get("CTFCTL_DEBUG"):
             raise
         util.eprint(f"internal error: {type(exc).__name__}: {exc}")
-        util.eprint("set CTFCTL_DEBUG=1 for a traceback; please report this with the command")
+        util.eprint(
+            "set CTFCTL_DEBUG=1 for a traceback; please report this with the command"
+        )
         return util.EXIT_INTERNAL
 
 
