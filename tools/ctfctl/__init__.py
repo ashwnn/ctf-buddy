@@ -21,11 +21,13 @@ __all__ = [
     "decoy",
     "discover",
     "doctor",
+    "files",
     "kbindex",
     "observe",
     "plan",
     "platformx",
     "profiles",
+    "remote",
     "util",
 ]
 

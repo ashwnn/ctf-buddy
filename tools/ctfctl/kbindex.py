@@ -29,6 +29,8 @@ SCHEMA_VERSION = 2
 INDEX_REL = os.path.join("index", "kb.sqlite3")
 CARD_ROOT_REL = "kb"
 SOURCE_TEXT_ROOT_REL = os.path.join("sources", "text")
+#: Operator-provided text, indexed locally and never packaged (git-ignored).
+LOCAL_TEXT_ROOT_REL = os.path.join("sources", "local")
 DEFAULT_EXTENSIONS = (".md", ".markdown", ".txt", ".rst")
 
 # Minimum query length before we bother with a search.
@@ -65,7 +67,9 @@ def build_safe_match(raw: str, mode: str = "auto") -> str:
     if not raw:
         raise util.UsageError("empty query")
     if len(raw) > MAX_QUERY_LEN:
-        raise util.UsageError(f"query too long ({len(raw)} > {MAX_QUERY_LEN} characters)")
+        raise util.UsageError(
+            f"query too long ({len(raw)} > {MAX_QUERY_LEN} characters)"
+        )
     if mode == "phrase":
         return quote_fts5(raw)
     terms = query_terms(raw)
@@ -119,7 +123,9 @@ def title_from_markdown(text: str, fallback: str) -> str:
     return fallback
 
 
-def load_cards(root: str, manifest_path: str, *, max_bytes: int = 512 * 1024) -> List[Doc]:
+def load_cards(
+    root: str, manifest_path: str, *, max_bytes: int = 512 * 1024
+) -> List[Doc]:
     """Load card files. Manifest metadata is optional enrichment, not a gate."""
     manifest: Dict[str, Dict[str, Any]] = {}
     for record in util.load_jsonl(manifest_path):
@@ -135,7 +141,9 @@ def load_cards(root: str, manifest_path: str, *, max_bytes: int = 512 * 1024) ->
         except util.CtfError:
             continue
         record = manifest.get(rel, {})
-        title = str(record.get("title") or title_from_markdown(body, os.path.basename(path)))
+        title = str(
+            record.get("title") or title_from_markdown(body, os.path.basename(path))
+        )
         docs.append(
             Doc(
                 stable_id=str(record.get("card_id") or f"file:{rel}"),
@@ -152,38 +160,73 @@ def load_cards(root: str, manifest_path: str, *, max_bytes: int = 512 * 1024) ->
     return docs
 
 
-def load_sources(root: str, manifest_path: str, *, max_bytes: int = 2 * 1024 * 1024) -> List[Doc]:
-    """Load locally stored source snapshots (opt-in, licence-gated)."""
+def load_sources(
+    root: str, manifest_path: str, *, max_bytes: int = 2 * 1024 * 1024
+) -> List[Doc]:
+    """Load locally stored snapshots and operator notes (opt-in, licence-gated).
+
+    Two roots are indexed, both git-ignored and both excluded from release
+    archives:
+
+    * `sources/text/` — licence-gated snapshots, matched to a manifest record by
+      `local_path`;
+    * `sources/local/` — the operator's own text, indexed with no manifest
+      requirement so a note can be dropped in and searched immediately.
+
+    Neither root is ever packaged: unknown licence is not permission to
+    redistribute, and local notes are not part of the distributed corpus.
+    """
     docs: List[Doc] = []
-    records = {r.get("source_id"): r for r in util.load_jsonl(manifest_path) if r.get("source_id")}
-    text_root = os.path.join(root, SOURCE_TEXT_ROOT_REL)
-    if not os.path.isdir(text_root):
-        return docs
-    for path in util.iter_files(text_root, extensions=DEFAULT_EXTENSIONS):
-        rel = _rel(path, root)
-        record = None
-        for rec in records.values():
-            if rec.get("local_path") and str(rec["local_path"]).replace(os.sep, "/") == rel:
-                record = rec
-                break
-        try:
-            body = util.read_text(path, max_bytes)
-        except util.CtfError:
+    records = {
+        r.get("source_id"): r
+        for r in util.load_jsonl(manifest_path)
+        if r.get("source_id")
+    }
+    roots = (
+        (SOURCE_TEXT_ROOT_REL, False),
+        (LOCAL_TEXT_ROOT_REL, True),
+    )
+    for root_rel, operator_local in roots:
+        text_root = os.path.join(root, root_rel)
+        if not os.path.isdir(text_root):
             continue
-        title = str((record or {}).get("title") or title_from_markdown(body, os.path.basename(path)))
-        docs.append(
-            Doc(
-                stable_id=str((record or {}).get("source_id") or f"file:{rel}"),
-                kind="source",
-                path=rel,
-                title=title,
-                body=body,
-                aliases=[str((record or {}).get("author") or "")],
-                tags=[str((record or {}).get("source_type") or "").lower()],
-                stacks=[],
-                source_ids=[str((record or {}).get("source_id") or "")],
+        for path in util.iter_files(text_root, extensions=DEFAULT_EXTENSIONS):
+            rel = _rel(path, root)
+            record = None
+            if not operator_local:
+                for rec in records.values():
+                    if (
+                        rec.get("local_path")
+                        and str(rec["local_path"]).replace(os.sep, "/") == rel
+                    ):
+                        record = rec
+                        break
+            try:
+                body = util.read_text(path, max_bytes)
+            except util.CtfError:
+                continue
+            title = str(
+                (record or {}).get("title")
+                or title_from_markdown(body, os.path.basename(path))
             )
-        )
+            tags = [str((record or {}).get("source_type") or "").lower()]
+            tags = [tag for tag in tags if tag]
+            if operator_local:
+                tags.append("local")
+            source_id = str((record or {}).get("source_id") or "")
+            docs.append(
+                Doc(
+                    stable_id=source_id or f"file:{rel}",
+                    kind="source",
+                    path=rel,
+                    title=title,
+                    body=body,
+                    aliases=[str((record or {}).get("author") or "")],
+                    tags=tags,
+                    stacks=[],
+                    source_ids=[source_id] if source_id else [],
+                )
+            )
     return docs
 
 
@@ -282,12 +325,27 @@ def _fts5_available(conn: sqlite3.Connection) -> bool:
             pass
 
 
-def _insert_doc(conn: sqlite3.Connection, doc: Doc, sha: str, mtime_ns: int,
-                size: int, use_fts: bool) -> int:
+def _insert_doc(
+    conn: sqlite3.Connection,
+    doc: Doc,
+    sha: str,
+    mtime_ns: int,
+    size: int,
+    use_fts: bool,
+) -> int:
     cur = conn.execute(
         "INSERT INTO docs (stable_id, kind, path, title, content_sha256, mtime_ns,"
         " size_bytes, indexed_at) VALUES (?,?,?,?,?,?,?,?)",
-        (doc.stable_id, doc.kind, doc.path, doc.title, sha, mtime_ns, size, util.iso_now()),
+        (
+            doc.stable_id,
+            doc.kind,
+            doc.path,
+            doc.title,
+            sha,
+            mtime_ns,
+            size,
+            util.iso_now(),
+        ),
     )
     rowid = int(cur.lastrowid)
     if use_fts:
@@ -296,20 +354,40 @@ def _insert_doc(conn: sqlite3.Connection, doc: Doc, sha: str, mtime_ns: int,
             (rowid, doc.title, " ".join(doc.aliases), doc.fts_text),
         )
     for tag in sorted(set(doc.tags)):
-        conn.execute("INSERT OR IGNORE INTO doc_tags (doc_rowid, tag) VALUES (?,?)", (rowid, tag))
+        conn.execute(
+            "INSERT OR IGNORE INTO doc_tags (doc_rowid, tag) VALUES (?,?)", (rowid, tag)
+        )
     for stack in sorted(set(doc.stacks)):
         conn.execute(
-            "INSERT OR IGNORE INTO doc_stacks (doc_rowid, stack) VALUES (?,?)", (rowid, stack)
+            "INSERT OR IGNORE INTO doc_stacks (doc_rowid, stack) VALUES (?,?)",
+            (rowid, stack),
         )
     return rowid
 
 
-def _update_doc(conn: sqlite3.Connection, rowid: int, doc: Doc, sha: str, mtime_ns: int,
-                size: int, use_fts: bool) -> None:
+def _update_doc(
+    conn: sqlite3.Connection,
+    rowid: int,
+    doc: Doc,
+    sha: str,
+    mtime_ns: int,
+    size: int,
+    use_fts: bool,
+) -> None:
     conn.execute(
         "UPDATE docs SET stable_id=?, kind=?, path=?, title=?, content_sha256=?, mtime_ns=?,"
         " size_bytes=?, indexed_at=? WHERE rowid=?",
-        (doc.stable_id, doc.kind, doc.path, doc.title, sha, mtime_ns, size, util.iso_now(), rowid),
+        (
+            doc.stable_id,
+            doc.kind,
+            doc.path,
+            doc.title,
+            sha,
+            mtime_ns,
+            size,
+            util.iso_now(),
+            rowid,
+        ),
     )
     if use_fts:
         conn.execute("DELETE FROM docs_fts WHERE rowid = ?", (rowid,))
@@ -320,15 +398,23 @@ def _update_doc(conn: sqlite3.Connection, rowid: int, doc: Doc, sha: str, mtime_
     conn.execute("DELETE FROM doc_tags WHERE doc_rowid = ?", (rowid,))
     conn.execute("DELETE FROM doc_stacks WHERE doc_rowid = ?", (rowid,))
     for tag in sorted(set(doc.tags)):
-        conn.execute("INSERT OR IGNORE INTO doc_tags (doc_rowid, tag) VALUES (?,?)", (rowid, tag))
+        conn.execute(
+            "INSERT OR IGNORE INTO doc_tags (doc_rowid, tag) VALUES (?,?)", (rowid, tag)
+        )
     for stack in sorted(set(doc.stacks)):
         conn.execute(
-            "INSERT OR IGNORE INTO doc_stacks (doc_rowid, stack) VALUES (?,?)", (rowid, stack)
+            "INSERT OR IGNORE INTO doc_stacks (doc_rowid, stack) VALUES (?,?)",
+            (rowid, stack),
         )
 
 
-def build(root: Optional[str] = None, *, rebuild: bool = False, docs: Optional[List[Doc]] = None,
-          target: Optional[str] = None) -> IndexStats:
+def build(
+    root: Optional[str] = None,
+    *,
+    rebuild: bool = False,
+    docs: Optional[List[Doc]] = None,
+    target: Optional[str] = None,
+) -> IndexStats:
     """Incrementally (or fully) rebuild the index. Deterministic when rebuilding."""
     root = root or util.repo_root()
     path = target or index_path(root)
@@ -347,8 +433,10 @@ def build(root: Optional[str] = None, *, rebuild: bool = False, docs: Optional[L
     try:
         if replacing:
             conn.executescript(DDL)
-            conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",
-                         (str(SCHEMA_VERSION),))
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",
+                (str(SCHEMA_VERSION),),
+            )
         else:
             # Existing index: verify schema before mutating.
             try:
@@ -374,9 +462,15 @@ def build(root: Optional[str] = None, *, rebuild: bool = False, docs: Optional[L
         conn.execute("BEGIN IMMEDIATE")
 
         existing: Dict[str, Tuple[int, str, int, int]] = {}
-        for row in conn.execute("SELECT rowid, stable_id, content_sha256, mtime_ns, size_bytes FROM docs"):
-            existing[row["stable_id"]] = (row["rowid"], row["content_sha256"],
-                                          row["mtime_ns"], row["size_bytes"])
+        for row in conn.execute(
+            "SELECT rowid, stable_id, content_sha256, mtime_ns, size_bytes FROM docs"
+        ):
+            existing[row["stable_id"]] = (
+                row["rowid"],
+                row["content_sha256"],
+                row["mtime_ns"],
+                row["size_bytes"],
+            )
 
         seen: set = set()
         for doc in docs:
@@ -390,13 +484,22 @@ def build(root: Optional[str] = None, *, rebuild: bool = False, docs: Optional[L
             if prior and prior[2] == st.st_mtime_ns and prior[3] == st.st_size:
                 stats.unchanged += 1
                 continue
-            sha = util.sha256_text(doc.title + "\x00" + doc.body + "\x00" + "\x00".join(doc.aliases)
-                                   + "\x00" + "\x00".join(sorted(doc.tags)))
+            sha = util.sha256_text(
+                doc.title
+                + "\x00"
+                + doc.body
+                + "\x00"
+                + "\x00".join(doc.aliases)
+                + "\x00"
+                + "\x00".join(sorted(doc.tags))
+            )
             if prior and prior[1] == sha and prior[2] == st.st_mtime_ns:
                 stats.unchanged += 1
                 continue
             if prior:
-                _update_doc(conn, prior[0], doc, sha, st.st_mtime_ns, st.st_size, use_fts)
+                _update_doc(
+                    conn, prior[0], doc, sha, st.st_mtime_ns, st.st_size, use_fts
+                )
                 stats.updated += 1
             else:
                 _insert_doc(conn, doc, sha, st.st_mtime_ns, st.st_size, use_fts)
@@ -410,10 +513,18 @@ def build(root: Optional[str] = None, *, rebuild: bool = False, docs: Optional[L
                 stats.deleted += 1
 
         count = conn.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
-        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('doc_count', ?)", (str(count),))
-        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('built_at', ?)", (util.iso_now(),))
-        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('fts5', ?)",
-                     ("1" if use_fts else "0"))
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('doc_count', ?)",
+            (str(count),),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('built_at', ?)",
+            (util.iso_now(),),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('fts5', ?)",
+            ("1" if use_fts else "0"),
+        )
         conn.commit()
         stats.total = int(count)
     except Exception:
@@ -466,15 +577,24 @@ def _fts_filter_sql(tag: Optional[str], stack: Optional[str]) -> Tuple[str, List
         sql += " AND EXISTS (SELECT 1 FROM doc_tags t WHERE t.doc_rowid = d.rowid AND t.tag = ?)"
         params.append(tag.lower())
     if stack:
-        sql += (" AND EXISTS (SELECT 1 FROM doc_stacks s WHERE s.doc_rowid = d.rowid"
-                " AND s.stack = ?)")
+        sql += (
+            " AND EXISTS (SELECT 1 FROM doc_stacks s WHERE s.doc_rowid = d.rowid"
+            " AND s.stack = ?)"
+        )
         params.append(stack.lower())
     return sql, params
 
 
-def search(raw: str, *, mode: str = "auto", tag: Optional[str] = None,
-           stack: Optional[str] = None, limit: int = DEFAULT_LIMIT, kind: Optional[str] = None,
-           root: Optional[str] = None) -> List[Hit]:
+def search(
+    raw: str,
+    *,
+    mode: str = "auto",
+    tag: Optional[str] = None,
+    stack: Optional[str] = None,
+    limit: int = DEFAULT_LIMIT,
+    kind: Optional[str] = None,
+    root: Optional[str] = None,
+) -> List[Hit]:
     """Ranked FTS5 search, degrading to literal search when FTS5 is missing."""
     limit = max(1, min(int(limit), MAX_LIMIT))
     root = root or util.repo_root()
@@ -486,10 +606,14 @@ def search(raw: str, *, mode: str = "auto", tag: Optional[str] = None,
         )
     conn = _connect(path)
     try:
-        use_fts = bool(conn.execute("SELECT value FROM meta WHERE key='fts5'").fetchone())
+        use_fts = bool(
+            conn.execute("SELECT value FROM meta WHERE key='fts5'").fetchone()
+        )
         use_fts = use_fts and _fts5_available(conn)
         if not use_fts:
-            return _py_literal_search(raw, tag=tag, stack=stack, limit=limit, kind=kind, root=root)
+            return _py_literal_search(
+                raw, tag=tag, stack=stack, limit=limit, kind=kind, root=root
+            )
         match = build_safe_match(raw, mode)
         sql = (
             "SELECT d.stable_id, d.kind, d.path, d.title,"
@@ -526,7 +650,9 @@ def search(raw: str, *, mode: str = "auto", tag: Optional[str] = None,
             for row in rows
         ]
         if not hits:
-            hits = _py_literal_search(raw, tag=tag, stack=stack, limit=limit, kind=kind, root=root)
+            hits = _py_literal_search(
+                raw, tag=tag, stack=stack, limit=limit, kind=kind, root=root
+            )
         return hits
     finally:
         conn.close()
@@ -537,8 +663,9 @@ def _clean_snippet(text: str) -> str:
     return util.printable(text.strip(), 400)
 
 
-def _resolve_missed_paths(root: str, tag: Optional[str], stack: Optional[str],
-                          kind: Optional[str]) -> List[str]:
+def _resolve_missed_paths(
+    root: str, tag: Optional[str], stack: Optional[str], kind: Optional[str]
+) -> List[str]:
     """When FTS misses, allow literal search to find paths/tags/aliases."""
     if not tag and not stack and not kind:
         return []
@@ -555,9 +682,16 @@ def _resolve_missed_paths(root: str, tag: Optional[str], stack: Optional[str],
     return out
 
 
-def literal(pattern: str, *, tag: Optional[str] = None, stack: Optional[str] = None,
-            limit: int = 40, kind: Optional[str] = None, root: Optional[str] = None,
-            fixed: bool = True) -> List[Hit]:
+def literal(
+    pattern: str,
+    *,
+    tag: Optional[str] = None,
+    stack: Optional[str] = None,
+    limit: int = 40,
+    kind: Optional[str] = None,
+    root: Optional[str] = None,
+    fixed: bool = True,
+) -> List[Hit]:
     """Exact substring (or regex) search over card text. Always available."""
     root = root or util.repo_root()
     if not pattern:
@@ -572,20 +706,42 @@ def literal(pattern: str, *, tag: Optional[str] = None, stack: Optional[str] = N
     if rg:
         hits = _rg_literal(rg, pattern, root=root, limit=limit, fixed=fixed)
     else:
-        hits = _py_literal_search(pattern, tag=tag, stack=stack, limit=limit, kind=kind,
-                                  root=root, fixed=fixed)
+        hits = _py_literal_search(
+            pattern,
+            tag=tag,
+            stack=stack,
+            limit=limit,
+            kind=kind,
+            root=root,
+            fixed=fixed,
+        )
     if allowed is not None:
         hits = [h for h in hits if h.path in allowed]
     return hits[:limit]
 
 
-def _rg_literal(rg: str, pattern: str, *, root: str, limit: int, fixed: bool) -> List[Hit]:
-    roots = [os.path.join(root, CARD_ROOT_REL), os.path.join(root, SOURCE_TEXT_ROOT_REL)]
+def _rg_literal(
+    rg: str, pattern: str, *, root: str, limit: int, fixed: bool
+) -> List[Hit]:
+    roots = [
+        os.path.join(root, CARD_ROOT_REL),
+        os.path.join(root, SOURCE_TEXT_ROOT_REL),
+    ]
     roots = [r for r in roots if os.path.isdir(r)]
     if not roots:
         return []
-    argv = [rg, "--no-config", "--json", "--sort", "path", "--line-number",
-            "--max-count", "5", "--max-filesize", "4M"]
+    argv = [
+        rg,
+        "--no-config",
+        "--json",
+        "--sort",
+        "path",
+        "--line-number",
+        "--max-count",
+        "5",
+        "--max-filesize",
+        "4M",
+    ]
     if not fixed:
         argv.append("--")
     if fixed:
@@ -594,8 +750,9 @@ def _rg_literal(rg: str, pattern: str, *, root: str, limit: int, fixed: bool) ->
     res = util.run(argv, timeout=30, max_output=8 * 1024 * 1024)
     hits: List[Hit] = []
     if res.unavailable:
-        return _py_literal_search(pattern, tag=None, stack=None, limit=limit, root=root,
-                                  fixed=fixed)
+        return _py_literal_search(
+            pattern, tag=None, stack=None, limit=limit, root=root, fixed=fixed
+        )
     for line in res.stdout.splitlines():
         try:
             record = json.loads(line)
@@ -624,8 +781,16 @@ def _rg_literal(rg: str, pattern: str, *, root: str, limit: int, fixed: bool) ->
     return hits
 
 
-def _py_literal_search(pattern: str, *, tag: Optional[str], stack: Optional[str], limit: int,
-                       kind: Optional[str], root: str, fixed: bool = True) -> List[Hit]:
+def _py_literal_search(
+    pattern: str,
+    *,
+    tag: Optional[str],
+    stack: Optional[str],
+    limit: int,
+    kind: Optional[str],
+    root: str,
+    fixed: bool = True,
+) -> List[Hit]:
     """Pure-Python fallback: used when ripgrep is absent or FTS5 is missing."""
     docs = load_cards(root, os.path.join(root, "kb", "manifest.jsonl"))
     docs += load_sources(root, os.path.join(root, "sources", "manifest.jsonl"))
@@ -645,7 +810,9 @@ def _py_literal_search(pattern: str, *, tag: Optional[str], stack: Optional[str]
         if stack and stack.lower() not in doc.stacks:
             continue
         for line_no, line in enumerate(doc.body.splitlines(), 1):
-            found = (needle in line) if fixed else bool(matcher and matcher.search(line))
+            found = (
+                (needle in line) if fixed else bool(matcher and matcher.search(line))
+            )
             if not found:
                 continue
             hits.append(
@@ -697,8 +864,11 @@ def verify(root: Optional[str] = None) -> Dict[str, Any]:
             use_fts = conn.execute("SELECT value FROM meta WHERE key='fts5'").fetchone()
             if use_fts and use_fts[0] == "1":
                 fts_count = conn.execute("SELECT COUNT(*) FROM docs_fts").fetchone()[0]
-                check("docs-fts-row-parity", doc_count == fts_count,
-                      f"docs={doc_count} fts={fts_count}")
+                check(
+                    "docs-fts-row-parity",
+                    doc_count == fts_count,
+                    f"docs={doc_count} fts={fts_count}",
+                )
             orphans = conn.execute(
                 "SELECT COUNT(*) FROM doc_tags t LEFT JOIN docs d ON d.rowid=t.doc_rowid"
                 " WHERE d.rowid IS NULL"
@@ -710,8 +880,10 @@ def verify(root: Optional[str] = None) -> Dict[str, Any]:
                     stale.append(row["path"])
             check("indexed-paths-exist", not stale, ", ".join(stale[:5]))
             docs_on_disk = {d.path for d in collect_docs(root)}
-            missing = sorted(docs_on_disk - {row["path"] for row in
-                                             conn.execute("SELECT path FROM docs")})
+            missing = sorted(
+                docs_on_disk
+                - {row["path"] for row in conn.execute("SELECT path FROM docs")}
+            )
             if missing:
                 report["warnings"].append(
                     f"{len(missing)} file(s) are not indexed yet; run `ctfctl kb index`"
@@ -726,7 +898,9 @@ def verify(root: Optional[str] = None) -> Dict[str, Any]:
     check("unique-card-ids", not dupes, ", ".join(sorted(d for d in dupes if d)))
     paths = [c.get("path") for c in cards]
     dup_paths = {p for p in paths if paths.count(p) > 1}
-    check("unique-card-paths", not dup_paths, ", ".join(sorted(p for p in dup_paths if p)))
+    check(
+        "unique-card-paths", not dup_paths, ", ".join(sorted(p for p in dup_paths if p))
+    )
     known_sources = {r.get("source_id") for r in _all_source_records(root)}
     unresolved = []
     for card in cards:
@@ -734,8 +908,11 @@ def verify(root: Optional[str] = None) -> Dict[str, Any]:
             if sid not in known_sources:
                 unresolved.append(f"{card.get('card_id')}->{sid}")
     check("card-sources-resolve", not unresolved, ", ".join(unresolved[:5]))
-    missing_files = [c.get("path") for c in cards
-                     if c.get("path") and not os.path.exists(os.path.join(root, c["path"]))]
+    missing_files = [
+        c.get("path")
+        for c in cards
+        if c.get("path") and not os.path.exists(os.path.join(root, c["path"]))
+    ]
     check("manifest-files-exist", not missing_files, ", ".join(missing_files[:5]))
     return report
 

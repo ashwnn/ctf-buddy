@@ -15,7 +15,7 @@ PUNCTUATION_QUERIES = [
     "403",
     "ss -lntup",
     "python3 -m http.server 8000",
-    'CVE-2024-1234',
+    "CVE-2024-1234",
     "Accept: */*",
     "s3cr3t{flag}",
     "a && b || c",
@@ -66,8 +66,27 @@ def test_literal_search_finds_code_strings() -> None:
             fh.write("\nMARKER_UNIQUE_STRING ss -lntup $_GET ../etc/passwd\n")
         hits = kbindex.literal("MARKER_UNIQUE_STRING", root=root)
         check(hits, "literal search found nothing for an inserted marker")
-        check_eq(os.path.relpath(target, root).replace(os.sep, "/"), hits[0].path,
-                 "literal search returned the wrong path")
+        check_eq(
+            os.path.relpath(target, root).replace(os.sep, "/"),
+            hits[0].path,
+            "literal search returned the wrong path",
+        )
+
+
+def test_operator_local_text_is_indexed_without_a_manifest_record() -> None:
+    with repo_copy() as root:
+        local = os.path.join(root, "sources", "local")
+        os.makedirs(local, exist_ok=True)
+        with open(os.path.join(local, "my-note.md"), "w", encoding="utf-8") as fh:
+            fh.write("# Operator note\n\nLOCALTERM_ONLY_HERE says hello.\n")
+        kbindex.build(root=root, rebuild=True)
+        hits = kbindex.search("LOCALTERM_ONLY_HERE", root=root)
+        check(hits, "sources/local must be searchable without a manifest record")
+        check_eq(hits[0].path, "sources/local/my-note.md", "local hit path")
+        check_eq(hits[0].kind, "source", "local text is indexed as a source")
+        check(hits[0].stable_id.startswith("file:"), "local docs use a file: id")
+        report = kbindex.verify(root)
+        check(report["ok"], f"local text must not break verify: {report['checks']}")
 
 
 def test_deleted_document_is_removed_from_the_index() -> None:
@@ -91,12 +110,18 @@ def test_deleted_document_is_removed_from_the_index() -> None:
         report = kbindex.verify(root)
         # Deleting a file that is still listed in the manifest is exactly the kind
         # of divergence verify exists to catch, so it must be reported.
-        check(not report["ok"], "verify should flag a manifest entry whose file is gone")
-        check(any("manifest-files-exist" in err for err in report["errors"]),
-              f"expected a manifest-files-exist error, got {report['errors']}")
+        check(
+            not report["ok"], "verify should flag a manifest entry whose file is gone"
+        )
+        check(
+            any("manifest-files-exist" in err for err in report["errors"]),
+            f"expected a manifest-files-exist error, got {report['errors']}",
+        )
         names = [row["path"] for row in _indexed_rows(root)]
-        check(os.path.relpath(victim, root).replace(os.sep, "/") not in names,
-              "deleted file is still indexed")
+        check(
+            os.path.relpath(victim, root).replace(os.sep, "/") not in names,
+            "deleted file is still indexed",
+        )
 
 
 def _indexed_rows(root: str):
@@ -133,9 +158,12 @@ def test_malformed_advanced_fts_is_reported_not_raised() -> None:
     with repo_copy() as root:
         kbindex.build(root=root, rebuild=True)
         try:
-            kbindex.search('NEAR(((', mode="raw", root=root)
+            kbindex.search("NEAR(((", mode="raw", root=root)
         except util.CtfError as exc:
-            check("literal" in (exc.hint or ""), "the error should point at literal search")
+            check(
+                "literal" in (exc.hint or ""),
+                "the error should point at literal search",
+            )
         except Exception as exc:  # any other exception type is a bug
             raise Failure(f"expected CtfError, got {type(exc).__name__}: {exc}")
 
@@ -159,7 +187,11 @@ def test_rebuild_is_deterministic() -> None:
         rows_one = _document_fingerprint(root)
         second = kbindex.build(root=root, rebuild=True)
         rows_two = _document_fingerprint(root)
-        check_eq(first.total, second.total, "rebuild should index the same number of documents")
+        check_eq(
+            first.total,
+            second.total,
+            "rebuild should index the same number of documents",
+        )
         check_eq(rows_one, rows_two, "rebuild must produce identical document rows")
 
 
@@ -167,9 +199,12 @@ def _document_fingerprint(root: str):
     conn = sqlite3.connect(kbindex.index_path(root))
     conn.row_factory = sqlite3.Row
     try:
-        rows = conn.execute("SELECT rowid, stable_id, path, content_sha256 FROM docs"
-                            " ORDER BY rowid").fetchall()
-        return [(r["rowid"], r["stable_id"], r["path"], r["content_sha256"]) for r in rows]
+        rows = conn.execute(
+            "SELECT rowid, stable_id, path, content_sha256 FROM docs ORDER BY rowid"
+        ).fetchall()
+        return [
+            (r["rowid"], r["stable_id"], r["path"], r["content_sha256"]) for r in rows
+        ]
     finally:
         conn.close()
 
@@ -181,7 +216,9 @@ def test_index_verify_detects_row_parity() -> None:
         check(report["ok"], f"fresh index should verify: {report['errors']}")
         conn = sqlite3.connect(kbindex.index_path(root))
         try:
-            conn.execute("DELETE FROM docs_fts WHERE rowid = (SELECT MIN(rowid) FROM docs_fts)")
+            conn.execute(
+                "DELETE FROM docs_fts WHERE rowid = (SELECT MIN(rowid) FROM docs_fts)"
+            )
             conn.commit()
         finally:
             conn.close()
