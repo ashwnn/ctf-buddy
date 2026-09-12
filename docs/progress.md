@@ -3,6 +3,92 @@
 Append-only. Newest entries at the top. One line per verified slice; details go
 in `docs/validation.md` and `docs/remote-mode.md`.
 
+## 2026-09-12 (final) — one-command recon, honeypots, gated lockdown, cheat sheets
+
+**`ctfctl remote auto <ip>` added.** One read-only pass over a declared host:
+probe -> install/discover -> plan (two-pass, authorization mirrored) -> bounded
+file recon of `/var/www`, `/srv`, `/opt`, `/home` -> `state/reports/auto-<host>-<stamp>.{json,md}`
+with identity, listeners, containers, firewall posture, detected stacks, plan
+actions, evidence gaps and suggested unused honeypot ports. Read-only by default;
+`--apply` and `--honeypot-port` each additionally require `--yes` and reuse the
+gated paths below. A target without `python3` still yields the probe report plus a
+recorded gap.
+
+**Honeypots added** (`tools/ctfctl/honeypot.py`, `decoy.py` banner mode, CLI
+`honeypot` and `remote honeypot`). Up to four listeners per host, `http` lure or
+`banner` mode (ssh/smtp/ftp/telnet presets or custom text), every event marked
+`decoy=true`, 4 MiB log budget per listener, 8 concurrent connections, and a
+hard refusal to bind a port that is already in use or a privileged port without
+`--allow-privileged`. Start/stop over ssh require declaration + acknowledged
+policy + `--yes`; `status`/`logs`/`collect` are read-only, and `collect` only ever
+reads paths this toolkit created (validated before they reach an ssh argv).
+
+**Review-only lockdown added** (`firewall.nft_lockdown_table`,
+`sshd.harden_authenticated_keys`, `ctfctl lockdown plan`, `remote lockdown`).
+The firewall action creates `/etc/ctfctl-lockdown.nft` containing one **additive**
+table that drops non-allowlisted inbound traffic; it never flushes the ruleset and
+never edits another table, so Docker NAT rules survive. The allowlist is the team
+ranges plus the operator's own address (read from the target's `$SSH_CONNECTION`)
+plus every port the probe saw listening; `0.0.0.0/0` and an allowlist that
+excludes the operator are refused, as is an empty one. The sshd action appends
+key-only directives, refuses a `Match` block or an empty config, requires a
+non-empty `authorized_keys`, and validates with `sshd -t` **and** `sshd -T`
+(drop-ins included). Both are `review-only` (`--approve-review --yes`); rollback
+restores the pre-image and runs `nft delete table inet ctfctl_lockdown`.
+
+**New engine capability: `file_create`.** Actions may create a file, with a
+rollback that deletes it -- and refuses to delete it if a teammate edited it
+afterwards. Rollback effects now prefer an action-supplied `rollback_argv`
+(loading a firewall table is not its own inverse; deleting it is). New verifiers
+`nft.table` and `sshd.option`, and the nft effect allowlist accepts exactly two
+argv shapes.
+
+**Access-preserving guard.** After any apply whose plan touches sshd or firewall
+paths, `remote apply` opens a *fresh* SSH connection from the operator. If that
+fails, it reports the failure, attempts a rollback of the transaction, and prints
+the console recovery path. The unit suite covers the failing-reconnect path.
+
+**Nine cheat sheets added** (`kb/cheatsheets/`, 123 cards now, all indexed):
+web triage, web defence patch loop, PCAP one-liners, forensics triage, reverse
+engineering, crypto triage, A/D tick loop, vuln-box recon/lockdown/honeypot, and
+unknown-artifact triage. New command `ctfctl kb cheat [topic]` lists them or
+searches within the tag.
+
+**Bugs found and fixed:**
+
+* A stale lock (exclusive-create fallback, e.g. a crashed run on Windows) blocked
+  every future mutation forever. `WriterLock` now reclaims a lock only when the
+  recorded pid is dead *and* the file is older than 120 s, and never touches a
+  live one.
+* The first container run of the lockdown proved the plan was adding a
+  `tcp.connect 127.0.0.1:22` readiness check on hosts where nothing listens on 22,
+  so a correct lockdown was auto-rolled back. Verifiers are now pruned to checks
+  that describe the host.
+* `nft delete table ...` was rejected by the effect allowlist (list-vs-tuple
+  comparison), which would have made every firewall rollback refuse its own
+  inverse.
+* `sshd.harden_authenticated_keys` was not idempotent (it re-appended its block on
+  a second render) and `VerifyResult` was constructed with a `command` argument
+  that does not exist; both fixed and covered.
+
+**Verification:** `python tests/run_tests.py` -> **168 passed, 0 failed, 0 modules
+skipped** (104.3 s) with Docker available. New modules: `t_lockdown` (13),
+`t_honeypot` (7), `t_remote_ops` (12), `t_integration_lockdown` (1); `t_engine`
+and `t_kbindex` gained lock-reclaim and cheat-sheet tests. Details and the
+explicit not-run list are in `docs/validation.md`.
+
+**Docs:** `docs/decoy.md` (new), `docs/remote-mode.md` (auto/lockdown/honeypot
+sections), `docs/support-matrix.md` (new rows, the two review-only exceptions,
+stubbed-container honesty), `docs/event-facts.md` (U15/U16), `docs/team-operations.md`,
+`docs/card-template.md` (cheat-sheet adaptation), `README.md`. `doctor` now
+reports the cheat-sheet count and the honeypot/lockdown capability lines.
+
+**Release:** version bumped to 0.2.0; `python tools/package_release.py --json` built
+`dist/ctf-buddy-0.2.0.tar.gz` (215 files, deterministic, sha256
+`246c7a12e76cf1aefa3f8b1e1011285940790ee75e3c2fb2d98147ebfc261263`), `--check`
+verified it against its manifest, and `--rehearse` extracted it and ran the whole
+suite from the extracted tree: **168 passed, 0 failed, 0 modules skipped, 103.0 s**.
+
 ## 2026-09-12 (later) — Docker integration, real SSH lab, drills, release, template
 
 **Container fixtures validated.** Docker Desktop was started; the container

@@ -78,6 +78,8 @@ toolkit stays on the conservative side of it.
 | U12 | **"One connected device per member"**: may a member run a local VM? may we use a shared team server? | Assume each member is independent and offline-capable; no shared server | Kickoff briefing — see `docs/team-operations.md` for both cases |
 | U13 | **Whether a checker contacts an upstream port directly** (which would make binding it to loopback fatal) | Binding an upstream port to loopback is always `review-only`, never automatic | Capture checker traffic; check whether it ever connects to the upstream port |
 | U14 | **Whether the database port is a scored endpoint** | Never remove a database port publication automatically | Same as U13 |
+| U15 | **Whether host firewall changes are permitted** (and whether the checker's source range is known) | The lockdown stays a review-only plan with an explicit allowlist; nothing is applied without `--approve-review --yes` | Rules page; ask explicitly, then run `remote lockdown` and read the allowlist before applying |
+| U16 | **Whether sshd hardening is permitted and whether the team has a console** | The sshd action stays review-only and refuses without a usable `authorized_keys` entry | Rules page; confirm console/VNC access before applying |
 
 ## 5. Standing rules for this repository
 

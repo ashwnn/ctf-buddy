@@ -49,6 +49,14 @@ service owner drives and the helper talks.
 4. Submit one flag through the mock/tested submission path before trusting it.
 5. Write the first handoff line (template below) even if nothing broke.
 
+Only once availability and the first patch are stable: `ctfctl remote auto <host>`
+gives the written recon report, and `remote honeypot` can start a listener on a
+port the report shows as unused. Lockdown (`remote lockdown`) is the last step,
+with the console open and the allowlist read out loud to a teammate first. If
+the event forbids decoys or firewall changes, do neither — the commands refuse
+without the policy acknowledgement, but the acknowledgement is *your* claim
+that the rules allow it.
+
 If the environment resets: check the timeline for the last plan id and re-apply
 the exact plan. Do not improvise a new fix under time pressure.
 

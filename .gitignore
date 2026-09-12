@@ -44,3 +44,6 @@ Thumbs.db
 *.swp
 .idea/
 .vscode/
+
+# local agent harness state (never part of the deliverable)
+.agent/

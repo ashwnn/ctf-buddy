@@ -2,12 +2,15 @@
 
 Offline-first preparation toolkit for a first-time CTF team. It does two jobs:
 
-1. **Find the answer fast.** A curated, source-linked knowledge base (114 cards
+1. **Find the answer fast.** A curated, source-linked knowledge base (123 cards
    from 277 primary sources, 50 identifiable teams and maintainers) with ranked
-   local search, literal code search and a usable `rg`/Markdown fallback.
-2. **Operate on your vuln box by IP.** Point it at the host your team owns, get a
-   read-only inventory, explore the filesystem, then plan and apply tested,
-   narrow protective patches with backup, health checks and rollback over SSH.
+   full-text search, literal code search, nine copy-paste **cheat sheets**
+   (`ctfctl kb cheat`) and a usable `rg`/Markdown fallback.
+2. **Operate on your vuln box by IP.** One command for the read-only pass
+   (`ctfctl remote auto <ip>`: probe, discovery, plan, report), then reviewed and
+   reversible changes over SSH: narrow patches with backup, health checks and
+   rollback; an additive nftables lockdown; sshd key-only hardening; and
+   honeypot listeners that log attacker traffic.
 
 Ordinary use needs no Internet, no API keys and no cloud service. Only
 `ctfctl prep-online` may touch the network, and only before the event.
@@ -50,6 +53,8 @@ From a checkout (Arch/other Linux):
 ./ctfctl kb search "command injection bypass WAF"
 ./ctfctl kb literal "../.."     # literal code/error-string search, punctuation safe
 ./ctfctl kb show card-web-003   # or: ./ctfctl kb open card-web-003
+./ctfctl kb cheat               # all quick-reference sheets
+./ctfctl kb cheat pcap          # just the topic you need, right now
 ```
 
 Your own notes can join the search without joining the corpus: drop Markdown into
@@ -67,7 +72,12 @@ On Windows, use `python tools\ctfctl.py <command>` instead of `./ctfctl`.
 #    policy, which is required before any mutation. Read the rules first.
 ./ctfctl targets declare 10.10.5.3 --label "our vuln box" --ack-policy
 
-# 2. Read-only inventory. No remote python needed, nothing is changed.
+# 2. One read-only pass: probe + discovery + plan + a written report.
+#    Nothing is changed, and no flag/credential is ever copied back.
+./ctfctl remote auto 10.10.5.3
+#    -> state/reports/auto-10.10.5.3-<stamp>.md (+ .json)
+
+# 2b. Or step by step. Read-only inventory; no remote python needed.
 ./ctfctl remote probe 10.10.5.3 --save
 
 # 3. Explore the filesystem: bounded, redacted, absolute paths only.
@@ -87,6 +97,26 @@ On Windows, use `python tools\ctfctl.py <command>` instead of `./ctfctl`.
 ./ctfctl remote rollback 10.10.5.3 --list
 ./ctfctl remote rollback 10.10.5.3 --tx <tx-id> --yes
 ```
+
+### Defend and distract (all review-only or explicitly confirmed)
+
+```bash
+# Additive nftables allowlist + sshd key-only hardening. Creates ONE table and
+# never flushes anything; your own SSH address is always in the allowlist.
+./ctfctl remote lockdown 10.10.5.3 --allow-cidr 10.10.0.0/16
+# read the diff, open the console, then:
+./ctfctl remote apply 10.10.5.3 --plan <plan-id> --approve-review --yes
+
+# Honeypots on ports the probe showed as unused (http lure or protocol banner).
+./ctfctl remote honeypot 10.10.5.3 start --honeypot-port 8080 --yes
+./ctfctl remote honeypot 10.10.5.3 start --honeypot-port 2222 --mode banner --banner ssh --yes
+./ctfctl remote honeypot 10.10.5.3 logs
+./ctfctl remote honeypot 10.10.5.3 collect     # bounded copy into captures/
+./ctfctl remote honeypot 10.10.5.3 stop --all --yes
+```
+
+Details, bounds and failure modes: `docs/remote-mode.md`, `docs/decoy.md`,
+`docs/support-matrix.md`.
 
 `remote run <host> <subcommand>` proxies only read-only subcommands (doctor,
 discover, plan, verify, watch, files, profiles, kb, recover). Mutations must go
@@ -131,9 +161,11 @@ explicitly allowlisted.
 | Remote files exploration | Supported; absolute paths, byte/entry caps, secret names refused |
 | Remote plan | Both shipped profiles and plan-only recommendations |
 | Remote apply / verify / rollback | Only profiles marked `tested-auto` (the two shipped ones) |
+| One-command recon (`remote auto`) | Supported; read-only by default, report under `state/reports/` |
 | Observation (`watch`) | Local bounded logs/capture; remote via `remote run <host> watch` |
-| Decoy | Local only, disabled by default, requires explicit unused port + ack |
-| SSH/firewall hardening, package upgrades, mass password rotation | **Not automated.** Review-only by design; see `docs/support-matrix.md` |
+| Decoy / honeypot | Local and remote; off until an unused port is named; never binds a busy port |
+| SSH/firewall lockdown | **Review-only**, two narrow reversible actions (additive nftables table, sshd key-only) with `--approve-review --yes`; see `docs/support-matrix.md` |
+| Package upgrades, mass password rotation, firewall flushes, autobans | **Not automated.** Refused by design |
 
 ## Layout
 
@@ -141,7 +173,7 @@ explicitly allowlisted.
 ctfctl                  thin bash wrapper (python3 -m ctfctl)
 tools/ctfctl/           the toolkit (stdlib only)
 tools/package_release.py  documented release builder with checksums and licences
-kb/                     source-linked cards; kb/manifest.jsonl is the index of record
+kb/                     source-linked cards (incl. kb/cheatsheets/); kb/manifest.jsonl is the index of record
 sources/                source provenance and verification records
 profiles/               explicit supported stack profiles (YAML-ish JSON)
 fixtures/               disposable practice services
@@ -153,10 +185,10 @@ research/               research notes that informed the build (read-only refere
 dist/                   built releases (git-ignored)
 ```
 
-Read next: `docs/remote-mode.md` for the SSH workflow in detail,
-`docs/team-operations.md` for the first 30 minutes, `docs/support-matrix.md` for
-what is automated and what is deliberately not, and `docs/validation.md` for
-exactly which checks were run and which were not.
+Read next: `docs/remote-mode.md` for the SSH workflow in detail, `docs/decoy.md`
+for honeypots and decoys, `docs/team-operations.md` for the first 30 minutes,
+`docs/support-matrix.md` for what is automated and what is deliberately not, and
+`docs/validation.md` for exactly which checks were run and which were not.
 
 ## Honest limitations
 
@@ -164,5 +196,8 @@ exactly which checks were run and which were not.
   skips the container integration module with a clear reason when it is not.
 * Remote mode is tested against a fake SSH transport in the unit suite. A real
   end-to-end run needs a reachable host and is recorded in `docs/validation.md`.
+* The lockdown/honeypot container test stubs `nft` and `sshd` (the real packages
+  would need network access). It proves the engine and the listener, not that a
+  real ruleset loads on a real host; see `docs/support-matrix.md`.
 * Our functional checks are *our* checks. They do not prove that an unseen
   organizer checker passes; see `docs/validation.md`.

@@ -4,6 +4,13 @@ Cards live at `kb/<category>/<card-id>.md`. Metadata is **not** in the file —
 it goes in `kb/manifest.jsonl`. Use the section headings exactly so that search
 snippets and human scanning behave predictably.
 
+**Cheat sheets** (`kb/cheatsheets/card-cheat-*.md`) follow the same order and the
+same rules, with two adaptations: the *Symptoms* section reads as "when does this
+sheet apply", and the *Diagnostic sequence* is a single ordered command walk
+rather than per-card branching. They carry the `cheatsheet` tag in the manifest so
+`ctfctl kb cheat [topic]` can list them; every other rule (evidence status,
+sources, no fabricated output) is unchanged.
+
 ```markdown
 # <Descriptive title: verb + object>
 

@@ -21,14 +21,18 @@ unseen organizer checker passes.
 python tests/run_tests.py
 ```
 
-Result (2026-09-12): **132 passed, 0 failed, 0 modules skipped, 83.2 s**,
-exit code 0. Docker was available, so the container integration module ran
-instead of skipping.
+Result (2026-09-12, latest): **168 passed, 0 failed, 0 modules skipped, 104.3 s**,
+exit code 0. Docker was available, so both container modules ran instead of
+skipping.
 
 | Module | Tests | What it proves |
 |---|---|---|
-| `t_engine` | 20 | Apply/rollback, stale plans, interrupted transactions, conflicting rollback, single-writer lock, failed syntax validation, functional regression -> automatic rollback, repeated apply, metadata preservation, line endings |
+| `t_engine` | 22 | Apply/rollback, stale plans, interrupted transactions, conflicting rollback, single-writer lock (including reclaiming a lock left by a dead process), failed syntax validation, functional regression -> automatic rollback, repeated apply, metadata preservation, line endings |
 | `t_remote` | 22 | Host injection refusal, ssh argv construction, bundle contents, fingerprint change, probe parsing (ss/netstat/proc), declaration gate before ssh, two-pass plan, policy gate, `--yes` gate, apply mirroring, flag absorption for `remote run`, read-only allowlist, unreachable-host message |
+| `t_remote_ops` | 12 | `remote auto` read-only default + report files + `--yes` gate + graceful degradation without python3; honeypot gates and argument forwarding; `collect` refusing unvalidated paths; lockdown reading the operator address from the ssh session; the access-recheck auto-rollback after an ssh/firewall change |
+| `t_lockdown` | 13 | Additive ruleset rendering, `/0` and operator-excluding allowlists refused, effect/rollback argv shape, nft effect allowlist, sshd `Match`/empty-config refusal, key-required validation, idempotent second render, review-only plan shape, verifier pruning, and the `file_create` apply/rollback/conflict paths |
+| `t_honeypot` | 7 | Busy/privileged/invalid ports refused, listener cap, HTTP lure logging with `decoy=true`, banner mode speaking first, per-port stop |
+| `t_integration_lockdown` | 1 | End-to-end lockdown inside a disposable container: create + load + verify + rollback of the nftables file, sshd config restore, effect dispatch and rollback effect, honeypot serving and logging (`nft`/`sshd` stubbed) |
 | `t_profiles` | 14 | Closed action registry, allowlisted argv, detection predicates, shipped profiles valid |
 | `t_safety` | 13 | Offline commands open no socket, no free-form command strings, inert rendering, no secrets in reports |
 | `t_decoy` | 11 | Rules gate, port safety, resource bounds, inert responses, lifecycle start/status/stop |
@@ -142,7 +146,10 @@ python tools/package_release.py --check dist/ctf-buddy-0.1.0.tar.gz
 | Not run | Why | How to validate |
 |---|---|---|
 | The real event stack against real organizer rules | No event environment exists yet | `remote probe`, then `remote plan --verbose`; run the legitimate workflow and the profile's exploit probe before and after |
-| Host firewall / SSH config changes | Not implemented by policy (review-only) | Operator decision; container tests cannot validate host networking, so never count them as proof |
+| A real nftables load and its host effect | The container test stubs `nft` (real packages need network) | On the declared host: `remote lockdown`, read the diff, then `nft list table inet ctfctl_lockdown` and a real reconnect check while the console is open |
+| A real `sshd -t`/`-T` run and a post-hardening reconnect | Same reason: `sshd` is stubbed in the container | On the declared host, after `--approve-review --yes`: open a *second* SSH session and re-run `sshd -T \| grep -i passwordauth` |
+| `remote honeypot` / `remote lockdown` over a real SSH session | Covered by the fake-transport tests only | Run both against a throwaway lab host before the event and record the result here |
+| Honeypots under adversarial traffic | Only loopback requests were made | Start a listener once ticks begin and read `honeypot logs`/`collect` |
 | Privileged discovery completeness on the event host | Lab was a container, not the event VM | `discover` on the target as root vs unprivileged, compare gaps |
 | Windows host mutation | Unsupported by design | N/A |
 | Long-running observation under real attack traffic | Lab had no adversary | `watch` on the declared host once ticks start |

@@ -24,7 +24,10 @@ construction.
 | Remote apply/verify/rollback/recover | Supported | Supported | Target needs python3; only tested-auto profiles apply |
 | Local host mutation (`ctfctl apply`) | Supported | Unsupported | Linux-only by design; refuse with a clear message elsewhere |
 | `watch` (bounded logs/capture) | Supported | Logs only | Capture needs tcpdump on the host being watched |
-| Decoy | Supported | Local loopback only | Off until rules acknowledged and an unused port is named |
+| Decoy / honeypot | Supported | Local loopback only | Off until rules acknowledged and an unused port is named; never binds a busy port |
+| Remote honeypot (`remote honeypot`) | Supported | Supported | Declaration + policy ack + `--yes` to start/stop; status/logs/collect are read-only |
+| Remote lockdown (`remote lockdown`) | Supported (review-only) | Supported (plan only) | Additive nftables table + sshd key-only; needs `--approve-review --yes`, always keeps the operator's SSH address, and wants a console open |
+| One-command recon (`remote auto`) | Supported | Supported | Read-only by default; `--apply`/`--honeypot-port` additionally require `--yes` |
 
 ## Shipped stack profiles
 
@@ -52,23 +55,41 @@ not do them for you:
 
 * blanket package upgrades;
 * rotating all passwords or keys;
-* flushing firewall rules or enabling default-deny;
+* flushing firewall rules or replacing another table (`flush ruleset` is never
+  generated, and the lockdown table is added, not substituted);
+* a default-deny firewall with no allowlist — the action refuses an empty
+  allowlist and refuses `0.0.0.0/0`, and always requires the operator's own
+  source address;
 * disabling "unknown" services;
 * deleting suspicious files;
 * changing database bind addresses;
 * recursive permission changes;
-* broad WAF blocks or IP autobans;
+* broad WAF blocks or IP autobans (including autobans driven by honeypot hits);
 * bind-mounting an upstream/backend port to loopback without proof that the
   organizer checker does not contact it directly (always review-only).
 
 ## SSH and firewall changes
 
-Not automated in this release. The SSH path is transport only: ctfctl never
-edits the target's `sshd_config`, and it never flushes or rewrites firewall
-rules. Those remain **review-only** operator work, and any future automation
-must require console/recovery access or an independent timed rollback that
-survives loss of the invoking session. Container tests never validate host
-firewall or SSH behavior; do not read them as such.
+The SSH path is transport; `remote run` remains read-only. Two narrow actions are
+the only firewall/SSH code in the toolkit, and both are **review-only** and
+reversible:
+
+| Action | Changes | Refuses when | Rollback |
+|---|---|---|---|
+| `firewall.nft_lockdown_table` | creates `/etc/ctfctl-lockdown.nft` and loads the one additive table `inet ctfctl_lockdown` | no allowlist, a `/0` entry, an allowlist that excludes the operator, a path outside `/etc`, `nft -c -f` rejects the ruleset, `nft` is missing | `nft delete table inet ctfctl_lockdown` plus deletion of the created file |
+| `sshd.harden_authenticated_keys` | appends key-only directives to a real `sshd_config` | a `Match` block, an empty config, no usable `authorized_keys` entry, `sshd -t`/`sshd -T` rejects the candidate, `sshd` is missing | restore the pre-image and restart the service |
+
+Both keep the ability to reconnect by construction (the operator's SSH source
+address is in the allowlist; the sshd action never changes ports or auth keys),
+and `remote apply` opens a *fresh* SSH connection after any access-affecting
+change, auto-rolling back if it fails. The out-of-band console is still expected
+to be open: a firewall typo can end the session before the reconnect check runs.
+
+Container tests exercise the engine paths (file create/replace/delete, effect
+dispatch, rollback) with **stubbed** `nft`/`sshd` binaries, because installing the
+real packages needs network access. They do **not** validate that a real
+ruleset loads on a real host, nor host firewall or SSH reachability. Do not read
+them as such.
 
 ## Resource and output bounds
 
@@ -80,5 +101,8 @@ firewall or SSH behavior; do not read them as such.
 | File read | 1 MiB hard cap (default 64 KiB), binary refused, secret names metadata-only |
 | Remote command output | 512 KiB default, 1 MiB for the probe |
 | Remote upload | ~250 KiB bundle, 240 s timeout |
-| Decoy | request body bounded, response slots bounded, log byte budget capped |
+| Decoy | request body bounded (64 KiB), 8 response slots, 4 MiB log budget, 10 s timeout |
+| Honeypot | at most 4 listeners, 8 concurrent connections each, 512-byte banner read, 4 MiB log budget per listener |
+| Remote honeypot collect | 4 MiB per log file, only paths this toolkit created, local copy under `captures/` |
+| Remote auto report | bounded probe/discover/plan payloads; report written under `state/reports/` |
 | Observation | 1800 s / 5000 lines / 512 KiB events per run |
