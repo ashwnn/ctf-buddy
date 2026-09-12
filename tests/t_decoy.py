@@ -204,14 +204,13 @@ def test_log_growth_is_capped() -> None:
             log_path = os.path.join(root, state["log_path"])
             # Directly exercise the server-side cap using a stand-in server object.
             server = decoy.DecoyServer.__new__(decoy.DecoyServer)
-            server.log_path = log_path
+            server.log = decoy.BoundedLog(log_path)
             server.marker = "test"
-            server._written = 0
-            server._stopped = False
             for index in range(400):
                 server.record({"event": "decoy-http", "decoy": True, "index": index,
                                "path": "/admin-" + "x" * 40})
-            check(server._stopped, "the writer must stop once the byte budget is reached")
+            check(server.log._stopped,
+                  "the writer must stop once the byte budget is reached")
             size = os.path.getsize(log_path)
             check(size <= decoy.MAX_LOG_BYTES + 2048,
                   f"the log must stay near its cap, got {size} bytes")

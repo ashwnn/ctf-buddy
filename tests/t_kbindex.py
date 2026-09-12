@@ -235,3 +235,22 @@ def test_no_index_is_a_clear_error_with_a_hint() -> None:
             check("kb index" in (exc.hint or ""), "hint should give the exact command")
         else:
             raise Failure("search without an index should raise CtfError")
+
+
+def test_cheatsheets_are_indexed_and_listed_by_tag() -> None:
+    with repo_copy() as root:
+        kbindex.build(root=root, rebuild=True)
+        hits = kbindex.by_tag("cheatsheet", limit=50, root=root)
+        ids = {hit.stable_id for hit in hits}
+        check(len(ids) >= 5, f"expected several cheatsheet cards, got {sorted(ids)}")
+        for expected in ("card-cheat-web-triage", "card-cheat-pcap",
+                         "card-cheat-vulnbox-lockdown"):
+            check_in(expected, ids, "the shipped cheatsheets must be listed")
+        found = kbindex.search("honeypot lockdown nftables", tag="cheatsheet",
+                               limit=5, root=root)
+        check(found, "a topic query must return cheatsheet hits")
+        check(any(hit.stable_id == "card-cheat-vulnbox-lockdown" for hit in found),
+              f"the lockdown cheat sheet must rank for its own topic: "
+              f"{[h.stable_id for h in found]}")
+        other = kbindex.by_tag("cheatsheet", kind="source", root=root)
+        check_eq(other, [], "sources are never cheatsheets")

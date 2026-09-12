@@ -482,3 +482,45 @@ def test_verifiers_do_not_store_response_bodies() -> None:
         check('"ok"' not in payload or "detail" in payload,
               "evidence should not embed the response body verbatim")
         check("sha256" in result.evidence, "evidence should carry a response hash instead")
+
+
+def test_stale_lock_from_a_dead_process_is_reclaimed() -> None:
+    """A crashed run must not block every future mutation forever.
+
+    The exclusive-create fallback (no flock, e.g. Windows) leaves the file
+    behind; the flock platforms are unaffected either way, so both must pass.
+    """
+    import time as _time
+
+    with repo_copy() as root:
+        lock_path = os.path.join(root, "state", "lock")
+        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+        with open(lock_path, "w", encoding="utf-8") as fh:
+            fh.write("pid=999999 at=1999-01-01T00:00:00Z\n")
+        old = _time.time() - 3600
+        os.utime(lock_path, (old, old))
+        lock = apply_mod.WriterLock(root)
+        lock.acquire()
+        try:
+            check(lock.mode in ("flock", "exclusive-create"), "the lock must be held")
+        finally:
+            lock.release()
+
+
+def test_live_lock_is_never_reclaimed() -> None:
+    import time as _time
+
+    with repo_copy() as root:
+        lock_path = os.path.join(root, "state", "lock")
+        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+        with open(lock_path, "w", encoding="utf-8") as fh:
+            fh.write(f"pid={os.getpid()} at={util.iso_now()}\n")
+        old = _time.time() - 3600
+        os.utime(lock_path, (old, old))
+        try:
+            apply_mod.WriterLock(root).acquire()
+        except util.CtfError as exc:
+            check("lock" in str(exc), "the refusal must name the lock")
+        else:
+            apply_mod.WriterLock(root).release()
+            raise Failure("a lock held by a live process must never be reclaimed")

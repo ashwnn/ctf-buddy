@@ -39,7 +39,9 @@ class FakeSSH:
 
     def __call__(self, argv, *, input_text=None, timeout=None, max_output=None):
         self.calls.append({"argv": [str(a) for a in argv], "input": input_text})
-        joined = " ".join(str(a) for a in argv)
+        # Routes match argv *and* stdin: several calls share `sh -s` and are told
+        # apart only by the script they are fed.
+        joined = " ".join(str(a) for a in argv) + " " + str(input_text or "")
         for needle, result in self.routes:
             if needle in joined:
                 result.argv = [str(a) for a in argv]
