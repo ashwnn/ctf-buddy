@@ -1,0 +1,10 @@
+{
+  "submit_url": "http://127.0.0.1:8099/submit",
+  "allow_hosts": ["127.0.0.1", "localhost"],
+  "flag_regex": "[A-Za-z0-9_]{2,20}\\{[^}]{3,200}\\}",
+  "timeout_seconds": 5,
+  "max_attempts": 3,
+  "max_per_minute": 20,
+  "dry_run": true,
+  "state_file": "state/submit-seen.jsonl"
+}
