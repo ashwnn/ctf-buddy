@@ -49,6 +49,7 @@ profiles/            explicit supported stack profiles (YAML-ish JSON, no deps)
 fixtures/            disposable practice services and fault injectors
 tests/               pytest-free stdlib test suite + fixtures
 drills/              participant drill sheets, answers separate
+templates/           reusable templates kept away from runtime state (e.g. bounded submission)
 state/               runtime state (ignored)
 ```
 

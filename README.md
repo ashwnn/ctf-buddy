@@ -52,6 +52,12 @@ From a checkout (Arch/other Linux):
 ./ctfctl kb show card-web-003   # or: ./ctfctl kb open card-web-003
 ```
 
+Your own notes can join the search without joining the corpus: drop Markdown into
+`sources/local/` (git-ignored, excluded from release archives), run
+`./ctfctl kb index`, and your text is searchable locally. Snapshots that a
+licence permits can live in `sources/text/` and are matched to their source
+record; unknown licence means metadata only.
+
 On Windows, use `python tools\ctfctl.py <command>` instead of `./ctfctl`.
 
 ### Your vuln box by IP
@@ -98,6 +104,23 @@ cd fixtures/p1-flask-compose && docker compose up -d && cd ../..
 ./ctfctl decoy status                     # decoys stay off until rules are acknowledged
 ```
 
+### Drills and rehearsal
+
+```bash
+# Five short drills with separate answers: web diagnosis and patch, PCAP
+# reconstruction, unknown-VM inventory, patch regression and rollback, decoy.
+ls drills/
+python drills/assets/make-synthetic-pcap.py captures/drill02.pcap --json
+
+# Package and rehearse a release from the archive itself.
+python tools/package_release.py --rehearse --json
+python tools/package_release.py --check dist/ctf-buddy-0.1.0.tar.gz
+```
+
+The optional flag-submission template is in `templates/competition-automation/`;
+it is disabled by default, mock-endpoint only, and refuses any host that is not
+explicitly allowlisted.
+
 ## What is supported where
 
 | Capability | Status |
@@ -117,14 +140,17 @@ cd fixtures/p1-flask-compose && docker compose up -d && cd ../..
 ```
 ctfctl                  thin bash wrapper (python3 -m ctfctl)
 tools/ctfctl/           the toolkit (stdlib only)
+tools/package_release.py  documented release builder with checksums and licences
 kb/                     source-linked cards; kb/manifest.jsonl is the index of record
 sources/                source provenance and verification records
 profiles/               explicit supported stack profiles (YAML-ish JSON)
 fixtures/               disposable practice services
 tests/                  stdlib test suite (python tests/run_tests.py)
-drills/                 participant drill sheets (see docs/team-operations.md)
+drills/                 participant drill sheets, answers separate
+templates/              reusable templates kept away from runtime state
 docs/                   event facts, operations, validation and progress
 research/               research notes that informed the build (read-only reference)
+dist/                   built releases (git-ignored)
 ```
 
 Read next: `docs/remote-mode.md` for the SSH workflow in detail,
