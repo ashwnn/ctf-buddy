@@ -776,6 +776,417 @@ class SystemdUnitArgEdit(Action):
 
 
 # --------------------------------------------------------------------------
+# 5. firewall: additive nftables allowlist table (review-only, file_create)
+# --------------------------------------------------------------------------
+_NFT_PATH_RE = re.compile(r"^/etc/[A-Za-z0-9._-]{1,64}\.nft$")
+_NFT_TABLE_RE = re.compile(r"^[a-z][a-z0-9_]{2,31}$")
+_CIDR_RE = re.compile(r"^[0-9A-Fa-f:.]+/[0-9]{1,3}$")
+
+
+class FirewallNftLockdownTable(Action):
+    """Create a *separate* nftables table that drops non-allowlisted inbound traffic.
+
+    Deliberately additive: it never flushes the ruleset and never edits another
+    table, so Docker NAT rules and anything the image shipped keep working. The
+    operator's own SSH source address is mandatory in the allowlist, which is
+    what keeps the change from locking the team out of the box.
+    """
+
+    id = "firewall.nft_lockdown_table"
+    kind = "file_create"
+    summary = "Create an additive nftables table that drops non-allowlisted inbound traffic"
+    impact = (
+        "Adds one drop-only base chain at a later priority than the existing rules. "
+        "Established connections, loopback, ICMP and the allowlisted sources/ports keep "
+        "working; everything else inbound is dropped. No other table is flushed or edited. "
+        "A missing allowlist entry (for example the checker's source address) becomes a "
+        "silent score loss, so this is review-only and must be read before it is applied."
+    )
+    conditions = [
+        "the event rules permit host firewall changes on this box",
+        "the operator's own SSH source CIDR is in the allowlist (added automatically, never optional)",
+        "every port the organizer checker uses is either in allow_tcp_ports or comes from the allowlist",
+        "an out-of-band console (VNC/serial/provider) is available before applying",
+        "`nft -c -f` accepts the generated ruleset",
+    ]
+    rollback_text = (
+        "Delete the table (`nft delete table inet <table>`) and remove the generated file. "
+        "Rollback re-runs the delete so the running ruleset is clean even though the "
+        "pre-image file never existed."
+    )
+    eligibility = "review-only"
+    required_params = ("path", "allow_cidrs", "operator_cidr", "allow_tcp_ports")
+    optional_params = ("table", "allow_udp_ports", "log_drops", "note")
+    verifier_kind = "nft_table"
+
+    # -- helpers ----------------------------------------------------------
+    @staticmethod
+    def _cidrs(raw: str) -> List[str]:
+        import ipaddress
+
+        out: List[str] = []
+        for item in str(raw).replace(";", ",").split(","):
+            item = item.strip()
+            if not item:
+                continue
+            if not _CIDR_RE.match(item):
+                raise ActionError(f"allowlist entry {item!r} is not a CIDR (for example 10.0.0.0/24)")
+            try:
+                network = ipaddress.ip_network(item, strict=False)
+            except ValueError as exc:
+                raise ActionError(f"allowlist entry {item!r} is not a valid network: {exc}")
+            if network.prefixlen == 0:
+                raise ActionError(
+                    f"allowlist entry {item!r} allows the whole internet, which defeats the "
+                    "lockdown; list the team and checker ranges instead"
+                )
+            out.append(str(network))
+        return out
+
+    @staticmethod
+    def _ports(raw: str) -> List[int]:
+        out: List[int] = []
+        for item in str(raw).replace(";", ",").split(","):
+            item = item.strip()
+            if not item or item.lower() in ("none", "-", "off"):
+                continue
+            if not item.isdigit() or not 0 < int(item) <= 65535:
+                raise ActionError(f"port {item!r} is not a valid TCP/UDP port")
+            out.append(int(item))
+        return sorted(set(out))
+
+    def preflight(self, params: Dict[str, Any]) -> List[str]:
+        problems = super().preflight(params)
+        if problems:
+            return problems
+        if not _NFT_PATH_RE.match(str(params.get("path"))):
+            problems.append("path must be a plain nftables file under /etc (e.g. /etc/ctfctl-lockdown.nft)")
+        table = str(params.get("table") or "ctfctl_lockdown")
+        if not _NFT_TABLE_RE.match(table):
+            problems.append(f"table name {table!r} must be a lowercase nftables identifier")
+        try:
+            cidrs = self._cidrs(params["allow_cidrs"])
+            self._ports(params["allow_tcp_ports"])
+        except ActionError as exc:
+            problems.append(str(exc))
+            return problems
+        operator = str(params["operator_cidr"])
+        if not cidrs:
+            problems.append("allow_cidrs is empty: refusing to build a default-deny table with no allowlist")
+        elif not any(
+            self._contains(entry, operator) for entry in cidrs
+        ):
+            problems.append(
+                f"operator_cidr {operator} is not covered by allow_cidrs, which would cut off "
+                "the operator's own SSH session"
+            )
+        return problems
+
+    @staticmethod
+    def _contains(cidr: str, value: str) -> bool:
+        import ipaddress
+
+        try:
+            if "/" in value:
+                return ipaddress.ip_network(value, strict=False).subnet_of(
+                    ipaddress.ip_network(cidr, strict=False)
+                )
+            return ipaddress.ip_address(value) in ipaddress.ip_network(cidr, strict=False)
+        except (ValueError, TypeError):
+            return False
+
+    def _ruleset(self, params: Dict[str, Any]) -> str:
+        table = str(params.get("table") or "ctfctl_lockdown")
+        cidrs = self._cidrs(params["allow_cidrs"])
+        tcp = self._ports(params["allow_tcp_ports"])
+        udp = self._ports(params.get("allow_udp_ports") or "")
+        v4 = [c for c in cidrs if ":" not in c]
+        v6 = [c for c in cidrs if ":" in c]
+        note = str(params.get("note") or "")
+        lines = [
+            "# ctfctl lockdown table -- review-only, generated change.",
+            "# Remove it with `ctfctl remote lockdown <host> --revert` (or the transaction rollback).",
+            "# This table only drops traffic that is not allowlisted. It flushes and edits nothing.",
+        ]
+        if note:
+            lines.append("# note: " + util.printable(note, 200))
+        lines += [
+            f"table inet {table} {{",
+            "    chain input {",
+            "        type filter hook input priority filter + 10; policy accept;",
+            "        ct state established,related accept",
+            "        ct state invalid drop",
+            "        iif lo accept",
+            "        ip protocol icmp accept",
+            "        ip6 nexthdr ipv6-icmp accept",
+        ]
+        if tcp:
+            lines.append("        tcp dport { " + ", ".join(str(p) for p in tcp) + " } accept")
+        if udp:
+            lines.append("        udp dport { " + ", ".join(str(p) for p in udp) + " } accept")
+        if v4:
+            lines.append("        ip saddr { " + ", ".join(v4) + " } accept")
+        if v6:
+            lines.append("        ip6 saddr { " + ", ".join(v6) + " } accept")
+        if params.get("log_drops"):
+            lines.append(
+                '        log prefix "ctfctl-drop " limit rate 10/second counter drop'
+            )
+        else:
+            lines.append("        counter drop")
+        lines += ["    }", "}"]
+        return "\n".join(lines) + "\n"
+
+    def render(self, ctx: ActionContext, params: Dict[str, Any]) -> Optional[Candidate]:
+        text = self._ruleset(params)
+        if ctx.pre_text.strip() == text.strip():
+            return None
+        if ctx.pre_text and str(params.get("table") or "ctfctl_lockdown") in ctx.pre_text:
+            raise ActionError(
+                f"{ctx.target_path} already contains a '{params.get('table', 'ctfctl_lockdown')}' "
+                "table but with different content: edit it by hand instead of overwriting"
+            )
+        label = "a" if ctx.pre_text else "/dev/null"
+        return Candidate(
+            path=ctx.target_path,
+            new_text=text,
+            diff=unified_diff(ctx.target_path, ctx.pre_text, text, label=label),
+            notes=[
+                "additive nftables table; no other table is flushed or changed",
+                "the operator's SSH source CIDR is in the allowlist by construction",
+            ],
+        )
+
+    def validate(self, ctx: ActionContext, params: Dict[str, Any],
+                 candidate: Candidate) -> List[Check]:
+        import tempfile
+
+        checks: List[Check] = []
+        table = str(params.get("table") or "ctfctl_lockdown")
+        operator = str(params["operator_cidr"])
+        checks.append(Check("operator-reachable", operator in candidate.new_text,
+                            f"operator CIDR {operator} is present in the ruleset"))
+        if not util.which("nft"):
+            checks.append(Check(
+                "nft-syntax", False,
+                "nft is not installed on this host: the ruleset cannot be validated, so this "
+                "action refuses to create it",
+            ))
+            return checks
+        directory = os.path.dirname(ctx.target_path) or "/"
+        if not os.path.isdir(directory):
+            checks.append(Check("target-directory", False,
+                                f"{directory} does not exist on this host"))
+            return checks
+        with tempfile.NamedTemporaryFile("w", suffix=".nft", delete=False,
+                                         encoding="utf-8") as fh:
+            fh.write(candidate.new_text)
+            temp_path = fh.name
+        try:
+            res = util.run(["nft", "-c", "-f", temp_path], timeout=30)
+            checks.append(Check("nft-syntax", res.ok,
+                                util.printable((res.stdout + res.stderr).strip(), 300)
+                                or f"nft -c -f accepted {os.path.basename(temp_path)}"))
+        finally:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+        checks.append(Check("table-name", f"table inet {table} {{" in candidate.new_text,
+                            f"ruleset declares table inet {table}"))
+        return checks
+
+    def effects(self, ctx: ActionContext, params: Dict[str, Any]) -> List[Effect]:
+        table = str(params.get("table") or "ctfctl_lockdown")
+        return [Effect(
+            kind="nft_load_file",
+            argv=["nft", "-f", ctx.target_path],
+            description=f"load the additive lockdown table from {ctx.target_path}",
+            timeout=30.0,
+            requires="nft",
+            rollback_argv=["nft", "delete", "table", "inet", table],
+        )]
+
+
+# --------------------------------------------------------------------------
+# 6. sshd: disable password authentication when a key is proven present
+# --------------------------------------------------------------------------
+SSHD_OPTIONS = ("PasswordAuthentication", "KbdInteractiveAuthentication",
+                "PermitRootLogin")
+
+
+class SshdHardenAuthenticatedKeys(Action):
+    """Turn off sshd password auth -- only when an authorized key is proven to exist.
+
+    A lockout here costs the whole event, so the action refuses unless the
+    candidate config passes `sshd -t` **and** `sshd -T` reports the hardened
+    value, and it refuses outright when the file contains a `Match` block (an
+    appended directive would silently land inside that block).
+    """
+
+    id = "sshd.harden_authenticated_keys"
+    kind = "file_edit"
+    summary = "Disable sshd password authentication while an authorized key exists"
+    impact = (
+        "Appends hardening directives to the sshd configuration. The current SSH session "
+        "survives, but the *next* login must use a key or the console. Without a proven key "
+        "and a console this is a self-inflicted denial of service, which is why it is "
+        "review-only."
+    )
+    conditions = [
+        "a non-empty authorized_keys entry exists for the account that must keep access",
+        "the event rules permit SSH configuration changes",
+        "an out-of-band console (VNC/serial/provider) is available before applying",
+        "`sshd -t` and `sshd -T` accept the candidate configuration",
+    ]
+    rollback_text = "Restore the pre-image sshd_config and restart the service."
+    eligibility = "review-only"
+    required_params = ("path", "authorized_keys_path")
+    optional_params = ("permit_root_login", "disable_password_auth",
+                       "disable_keyboard_interactive", "service_unit")
+    verifier_kind = "sshd_option"
+
+    def preflight(self, params: Dict[str, Any]) -> List[str]:
+        problems = super().preflight(params)
+        if problems:
+            return problems
+        for key in ("path", "authorized_keys_path"):
+            value = str(params.get(key) or "")
+            if not value.startswith("/"):
+                problems.append(f"{key} must be an absolute path (got {value!r})")
+        root_login = str(params.get("permit_root_login") or "prohibit-password")
+        if root_login not in ("prohibit-password", "no"):
+            problems.append(
+                "permit_root_login must be 'prohibit-password' or 'no' "
+                "(this action never re-enables root login)"
+            )
+        unit = str(params.get("service_unit") or "ssh")
+        if not re.fullmatch(r"[A-Za-z0-9@._-]{1,64}", unit):
+            problems.append(f"service_unit {unit!r} is not a valid unit name")
+        return problems
+
+    def _desired(self, params: Dict[str, Any]) -> List[Tuple[str, str]]:
+        wanted: List[Tuple[str, str]] = []
+        if bool(params.get("disable_password_auth", True)):
+            wanted.append(("PasswordAuthentication", "no"))
+        if bool(params.get("disable_keyboard_interactive", True)):
+            wanted.append(("KbdInteractiveAuthentication", "no"))
+        wanted.append(("PermitRootLogin", str(params.get("permit_root_login") or "prohibit-password")))
+        return wanted
+
+    marker = "# ctfctl lockdown: appended by `ctfctl lockdown` (review-only change)."
+
+    def render(self, ctx: ActionContext, params: Dict[str, Any]) -> Optional[Candidate]:
+        source = ctx.pre_text
+        if not source.strip():
+            raise ActionError(f"{ctx.target_path} is empty; refusing to invent an sshd config")
+        if re.search(r"^\s*Match\b", source, re.MULTILINE):
+            raise ActionError(
+                "the sshd config contains a Match block; an appended directive would land "
+                "inside it. Edit the file by hand and re-run the plan"
+            )
+        wanted = self._desired(params)
+        # A previous run of this action may have appended a managed block; drop
+        # the whole block (blank line + comment + directives) before rebuilding it
+        # so a second apply is a no-op rather than a duplicate block.
+        base_lines = source.splitlines()
+        if self.marker in base_lines:
+            index = base_lines.index(self.marker)
+            if index and not base_lines[index - 1].strip():
+                index -= 1
+            base_lines = base_lines[:index]
+        keep: List[str] = []
+        for line in base_lines:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#") and \
+                    any(stripped.split()[0].lower() == name.lower() for name, _ in wanted):
+                continue  # replaced by the block below
+            keep.append(line)
+        block = [
+            "",
+            self.marker,
+            "# Remove this block to restore password authentication.",
+        ] + [f"{name} {value}" for name, value in wanted]
+        new_text = "\n".join(keep).rstrip("\n") + "\n" + "\n".join(block) + "\n"
+        if new_text == source:
+            return None
+        return Candidate(
+            path=ctx.target_path,
+            new_text=new_text,
+            diff=unified_diff(ctx.target_path, source, new_text),
+            notes=[f"appended {len(wanted)} hardening directive(s); no other setting changed"],
+        )
+
+    def validate(self, ctx: ActionContext, params: Dict[str, Any],
+                 candidate: Candidate) -> List[Check]:
+        import tempfile
+
+        checks: List[Check] = []
+        keys_path = str(params["authorized_keys_path"])
+        keys = util.read_text(keys_path, 64 * 1024) if os.path.isfile(keys_path) else ""
+        usable = [line for line in keys.splitlines()
+                  if line.strip() and not line.strip().startswith("#")]
+        checks.append(Check(
+            "authorized-key-present", bool(usable),
+            f"{keys_path} has {len(usable)} usable key line(s)" if usable
+            else f"{keys_path} is missing or empty: without a key this would lock everyone out",
+        ))
+        if not util.which("sshd"):
+            checks.append(Check("sshd-syntax", False,
+                                "sshd is not installed here: the candidate cannot be validated"))
+            return checks
+        with tempfile.NamedTemporaryFile("w", suffix="_sshd_config", delete=False,
+                                         encoding="utf-8") as fh:
+            fh.write(candidate.new_text)
+            temp_path = fh.name
+        try:
+            syntax = util.run(["sshd", "-t", "-f", temp_path], timeout=30)
+            checks.append(Check("sshd-syntax", syntax.ok,
+                                util.printable((syntax.stdout + syntax.stderr).strip(), 300)
+                                or "sshd -t accepted the candidate"))
+            effective = util.run(["sshd", "-T", "-f", temp_path], timeout=30,
+                                 max_output=512 * 1024)
+            if not effective.ok:
+                checks.append(Check(
+                    "sshd-effective", False,
+                    "sshd -T could not read the candidate: "
+                    + (util.printable(effective.stderr.strip(), 200) or "no output"),
+                ))
+            else:
+                lowered = effective.stdout.lower()
+                problems: List[str] = []
+                for name, value in self._desired(params):
+                    if f"{name.lower()} {value.lower()}" not in lowered:
+                        problems.append(f"{name} is not effectively {value}")
+                checks.append(Check(
+                    "sshd-effective", not problems,
+                    "; ".join(problems) if problems
+                    else "sshd -T reports every hardened value (drop-in files included)",
+                ))
+        finally:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+        return checks
+
+    def effects(self, ctx: ActionContext, params: Dict[str, Any]) -> List[Effect]:
+        # Restart only when systemd is genuinely the init system. A container or
+        # chroot has the binary without the manager; restarting there would fail
+        # and (correctly) roll the safe change back for no reason.
+        if not util.which("systemctl") or not os.path.isdir("/run/systemd/system"):
+            return []
+        unit = str(params.get("service_unit") or "ssh")
+        return [Effect(
+            kind="systemd_restart",
+            argv=["systemctl", "restart", unit],
+            description=f"restart {unit} so the hardened config is live",
+            timeout=60.0,
+            requires="systemctl",
+        )]
+
+
+# --------------------------------------------------------------------------
 # Registry
 # --------------------------------------------------------------------------
 ACTIONS: Dict[str, Action] = {
@@ -785,6 +1196,8 @@ ACTIONS: Dict[str, Action] = {
         PhpGuardedPathUse(),
         ComposePortChange(),
         SystemdUnitArgEdit(),
+        FirewallNftLockdownTable(),
+        SshdHardenAuthenticatedKeys(),
     )
 }
 

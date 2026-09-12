@@ -683,5 +683,6 @@ def effects_from_spec(spec: Dict[str, Any], profile: Profile,
             description=str(effect.get("description") or kind),
             timeout=float(effect.get("timeout") or 120.0),
             requires=(EFFECT_REQUIRES.get(kind) or [""])[0],
+            rollback_argv=[str(a) for a in substitute(effect.get("rollback_argv") or [], facts)],
         ))
     return out

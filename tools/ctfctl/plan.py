@@ -575,6 +575,217 @@ def build_plan(profile: profiles_mod.Profile, inventory: Dict[str, Any], *,
     return plan
 
 
+# --------------------------------------------------------------------------
+# Lockdown plan (host firewall + sshd), review-only by construction
+# --------------------------------------------------------------------------
+LOCKDOWN_PROFILE_ID = "local-lockdown"
+
+
+@dataclass
+class LockdownSpec:
+    """Operator-supplied parameters for one lockdown plan.
+
+    Everything here is explicit input, never inferred: the whole point of the
+    plan is that a human chose the allowlist before the box was locked down.
+    """
+
+    operator_cidr: str
+    allow_cidrs: List[str]
+    allow_tcp_ports: List[int]
+    allow_udp_ports: List[int] = field(default_factory=list)
+    include_firewall: bool = True
+    include_ssh: bool = True
+    log_drops: bool = False
+    nft_path: str = "/etc/ctfctl-lockdown.nft"
+    table: str = "ctfctl_lockdown"
+    sshd_path: str = "/etc/ssh/sshd_config"
+    authorized_keys_path: str = "/root/.ssh/authorized_keys"
+    service_unit: str = "ssh"
+    sshd_port: int = 22
+    note: str = ""
+
+
+def normalize_cidrs(values: Any, *, what: str = "allowlist entry") -> List[str]:
+    """Accept `10.0.0.5` as well as `10.0.0.0/24`, and refuse anything else.
+
+    A bare address becomes a /32 (or /128): the firewall grammar needs a prefix,
+    and silently dropping a malformed entry would weaken the allowlist.
+    """
+    import ipaddress
+
+    out: List[str] = []
+    items = [values] if isinstance(values, str) else list(values or [])
+    for raw in items:
+        text = str(raw).strip()
+        if not text:
+            continue
+        try:
+            if "/" in text:
+                out.append(str(ipaddress.ip_network(text, strict=False)))
+            else:
+                address = ipaddress.ip_address(text)
+                out.append(f"{address}/{'32' if address.version == 4 else '128'}")
+        except ValueError as exc:
+            raise util.CtfError(
+                f"{what} {text!r} is not an IP address or network: {exc}",
+                hint="use a CIDR such as 10.10.0.0/16, or a single address such as 10.10.5.9",
+            )
+    return list(dict.fromkeys(out))
+
+
+def _lockdown_profile(spec: LockdownSpec) -> profiles_mod.Profile:
+    """Build an in-code profile. No detection predicate: the operator asked for it."""
+    # The operator's own address is always in the allowlist, whatever was passed:
+    # a lockdown that locks out the person applying it is a self-inflicted zero.
+    operator_cidr = normalize_cidrs([spec.operator_cidr], what="operator address")[0]
+    allow_cidrs = normalize_cidrs(list(spec.allow_cidrs) + [operator_cidr])
+    facts: Dict[str, Any] = {
+        "allow_cidrs_list": allow_cidrs,
+        "nft_path": spec.nft_path,
+        "table": spec.table,
+        "allow_cidrs": ",".join(allow_cidrs),
+        "operator_cidr": operator_cidr,
+        # "none" rather than "": facts must be resolved to something non-empty,
+        # and the action parses "none" back to an empty port set.
+        "allow_tcp_ports": ",".join(str(p) for p in spec.allow_tcp_ports) or "none",
+        "allow_udp_ports": ",".join(str(p) for p in spec.allow_udp_ports) or "none",
+        "log_drops": spec.log_drops,
+        "note": spec.note or f"lockdown requested by the operator ({operator_cidr})",
+        "sshd_path": spec.sshd_path,
+        "authorized_keys_path": spec.authorized_keys_path,
+        "service_unit": spec.service_unit,
+    }
+    actions: Dict[str, Any] = {}
+    if spec.include_firewall:
+        actions["firewall"] = {
+            "action_id": "firewall.nft_lockdown_table",
+            "eligibility": "review-only",
+            "params": {
+                "path": "{nft_path}",
+                "table": "{table}",
+                "allow_cidrs": "{allow_cidrs}",
+                "operator_cidr": "{operator_cidr}",
+                "allow_tcp_ports": "{allow_tcp_ports}",
+                "allow_udp_ports": "{allow_udp_ports}",
+                "log_drops": "{log_drops}",
+                "note": "{note}",
+            },
+            "effects": [{
+                "kind": "nft_load_file",
+                "argv": ["nft", "-f", "{nft_path}"],
+                "rollback_argv": ["nft", "delete", "table", "inet", "{table}"],
+                "description": "load the additive lockdown table",
+                "timeout": 30,
+            }],
+        }
+    if spec.include_ssh:
+        actions["sshd"] = {
+            "action_id": "sshd.harden_authenticated_keys",
+            "eligibility": "review-only",
+            "params": {
+                "path": "{sshd_path}",
+                "authorized_keys_path": "{authorized_keys_path}",
+                "permit_root_login": "prohibit-password",
+                "disable_password_auth": True,
+                "disable_keyboard_interactive": True,
+                "service_unit": "{service_unit}",
+            },
+        }
+    verifiers: List[Dict[str, Any]] = [
+        {"verifier": "tcp.connect", "tier": "protocol",
+         "params": {"host": "127.0.0.1", "port": spec.sshd_port},
+         "description": "the box still accepts SSH connections"},
+    ]
+    if spec.include_firewall:
+        verifiers.append({
+            "verifier": "nft.table", "tier": "protocol",
+            "params": {"table": spec.table, "family": "inet"},
+            "description": "the lockdown table is loaded in the running ruleset",
+        })
+    if spec.include_ssh:
+        verifiers.append({
+            "verifier": "sshd.option", "tier": "protocol",
+            "params": {"option": "passwordauthentication", "value": "no"},
+            "description": "sshd reports password authentication as disabled",
+        })
+    return profiles_mod.Profile(
+        profile_id=LOCKDOWN_PROFILE_ID,
+        title="Operator-requested lockdown (additive nftables allowlist + sshd key-only)",
+        scope="host",
+        support_level="review-only",
+        requires=["root on the host", "nft for the firewall action", "an out-of-band console"],
+        detect={"all": []},
+        facts=facts,
+        actions=actions,
+        verifiers=verifiers,
+        exploit_probe=None,
+        notes=[
+            "Every action here is review-only: read the diff before approving.",
+            "The operator's own SSH source CIDR is in the firewall allowlist by construction.",
+            "IPv6 inbound is dropped unless an IPv6 allowlist entry is supplied.",
+            "Rollback deletes the added nftables table and restores sshd_config.",
+            "The generated nftables file is not auto-loaded at boot on every distro: "
+            "re-apply after a reboot, or wire it into the distro's own loader.",
+        ],
+    )
+
+
+def build_lockdown_plan(spec: LockdownSpec, inventory: Dict[str, Any], *,
+                        root: Optional[str] = None,
+                        allow_fixture: bool = True) -> Plan:
+    """Build a review-only lockdown plan against a discovery inventory."""
+    if not spec.include_firewall and not spec.include_ssh:
+        raise util.CtfError(
+            "nothing to plan: enable the firewall action, the sshd action, or both"
+        )
+    profile = _lockdown_profile(spec)
+    plan = build_plan(profile, inventory, root=root, allow_fixture=allow_fixture)
+    if not plan.actions:
+        plan.risks.append(
+            "no lockdown action could be rendered; see the skipped entries for the reason"
+        )
+    _prune_lockdown_verifiers(plan, inventory, spec)
+    return plan
+
+
+def _prune_lockdown_verifiers(plan: Plan, inventory: Dict[str, Any],
+                              spec: LockdownSpec) -> None:
+    """Keep only checks that describe this host, and only for live actions.
+
+    A verifier that cannot pass is not a safety net, it is a guaranteed
+    auto-rollback: `tcp.connect 22` would fail on a box whose sshd is stopped or
+    listens elsewhere, and the readiness gate would then undo a correct lockdown.
+    """
+    live_keys = {action.key for action in plan.actions if not action.skipped_reason}
+    listening: set = set()
+    for service in ((inventory.get("graph") or {}).get("services") or []):
+        try:
+            listening.add(int(service.get("port")))
+        except (TypeError, ValueError):
+            continue
+    kept: List[Dict[str, Any]] = []
+    for verifier in plan.verifiers:
+        name = str(verifier.get("verifier"))
+        params = verifier.get("params") or {}
+        if name == "nft.table" and "firewall" not in live_keys:
+            plan.skipped.append({"key": name, "reason": "the firewall action was not rendered"})
+            continue
+        if name == "sshd.option" and "sshd" not in live_keys:
+            plan.skipped.append({"key": name, "reason": "the sshd action was not rendered"})
+            continue
+        if name == "tcp.connect":
+            port = int(params.get("port") or 0)
+            if port not in listening:
+                plan.skipped.append({
+                    "key": name,
+                    "reason": f"nothing is listening on port {port} on this host, so there is "
+                              "no listener to re-check after the change",
+                })
+                continue
+        kept.append(verifier)
+    plan.verifiers = kept
+
+
 def _fingerprint(host: Dict[str, Any]) -> Dict[str, Any]:
     keys = ("kernel", "arch", "os_id", "os_version_id", "init_system", "boot_id")
     return {key: host.get(key) for key in keys}

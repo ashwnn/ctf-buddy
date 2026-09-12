@@ -462,6 +462,44 @@ def have(name: str) -> bool:
     return which(name) is not None
 
 
+def pid_alive(pid: int) -> bool:
+    """Non-destructive process liveness check.
+
+    POSIX: signal 0 is a pure permission/existence probe. Windows: os.kill is
+    destructive for every signal (it maps to TerminateProcess), and calling it
+    on a process that is mid-termination can block, so query the exit code
+    through the Win32 API instead.
+    """
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        return _pid_alive_windows(pid)
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _pid_alive_windows(pid: int) -> bool:
+    import ctypes
+    from ctypes import wintypes
+
+    process_query_limited_information = 0x1000
+    still_active = 259
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    handle = kernel32.OpenProcess(process_query_limited_information, False, int(pid))
+    if not handle:
+        return False
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return False
+        return code.value == still_active
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 # --------------------------------------------------------------------------
 # File metadata (used by the mutation engine)
 # --------------------------------------------------------------------------

@@ -76,17 +76,49 @@ class WriterLock:
             return
         except ImportError:
             pass
-        try:
-            fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
-            raise util.CtfError(
-                "another ctfctl writer holds the lock",
-                hint=f"lock file: {self.path}. If no ctfctl process is running, remove it.",
-            )
+        for attempt in (0, 1):
+            try:
+                fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                break
+            except FileExistsError:
+                # A crashed run cannot hold a lock. On platforms without flock the
+                # file is the only signal, so a lock left by a dead process must be
+                # reclaimable, or one killed run blocks every future mutation.
+                if attempt or not self._stale():
+                    raise util.CtfError(
+                        "another ctfctl writer holds the lock",
+                        hint=f"lock file: {self.path}. If no ctfctl process is running, "
+                             "remove it.",
+                    )
+                try:
+                    os.unlink(self.path)
+                except OSError:
+                    raise util.CtfError(
+                        "another ctfctl writer holds the lock",
+                        hint=f"lock file: {self.path}. If no ctfctl process is running, "
+                             "remove it.",
+                    )
         os.write(fd, f"pid={os.getpid()} at={util.iso_now()}\n".encode())
         os.close(fd)
         self._created = True
         self.mode = "exclusive-create"
+
+    LOCK_STALE_SECONDS = 120.0
+
+    def _stale(self) -> bool:
+        """True when the lock file names a dead pid and is old enough to trust that."""
+        try:
+            age = time.time() - os.path.getmtime(self.path)
+            with open(self.path, "r", encoding="utf-8", errors="replace") as fh:
+                text = fh.read(200)
+        except OSError:
+            return False
+        if age < self.LOCK_STALE_SECONDS:
+            return False
+        match = re.search(r"pid=(\d+)", text)
+        if not match:
+            return age >= self.LOCK_STALE_SECONDS * 2
+        return not util.pid_alive(int(match.group(1)))
 
     def release(self) -> None:
         if self._fd is not None:
@@ -133,6 +165,9 @@ class FileChange:
     metadata_warnings: List[str] = field(default_factory=list)
     replaced: bool = False
     effects: List[Dict[str, Any]] = field(default_factory=list)
+    #: True for a file this transaction created (rollback removes it instead of
+    #: restoring a pre-image, and there is no pre-image hash to compare against).
+    created: bool = False
 
 
 @dataclass
@@ -393,16 +428,30 @@ def _prepare_and_replace(tx: Transaction, plan: plan_mod.Plan,
         target = entry.target_path
         if not target:
             raise util.CtfError(f"action {entry.key} has no target path")
-        if not os.path.isfile(target):
-            raise util.CtfError(f"target file disappeared: {target}")
-        real_root = os.path.realpath(os.path.dirname(os.path.abspath(target)))
         if os.path.islink(target):
             raise util.CtfError(
                 f"refusing to patch a symlink target: {target}",
                 hint="resolve the real configuration file and re-plan against that path",
             )
-        pre_state = util.capture_file_state(target)
-        pre_text, pre_newline = util.read_text_preserving(target, 4 * 1024 * 1024)
+        creating = False
+        if not os.path.isfile(target):
+            # Only an action that explicitly declares it creates new files may do
+            # so, and its rollback is a deletion rather than a restore.
+            if action.kind != "file_create":
+                raise util.CtfError(f"target file disappeared: {target}")
+            creating = True
+        real_root = os.path.realpath(os.path.dirname(os.path.abspath(target)))
+        if not os.path.isdir(real_root):
+            raise util.CtfError(
+                f"the target directory does not exist: {real_root}",
+                hint="create the directory first, or point the plan at an existing one",
+            )
+        if creating:
+            pre_state = util.FileState(path=target, exists=False)
+            pre_text, pre_newline = "", "\n"
+        else:
+            pre_state = util.capture_file_state(target)
+            pre_text, pre_newline = util.read_text_preserving(target, 4 * 1024 * 1024)
         planned_pre = (entry.pre_state or {}).get("sha256")
         if planned_pre and pre_state.sha256 != planned_pre:
             raise util.CtfError(
@@ -412,20 +461,23 @@ def _prepare_and_replace(tx: Transaction, plan: plan_mod.Plan,
         change = FileChange(
             index=index, action_key=entry.key, action_id=entry.action_id, path=target,
             pre_sha256=pre_state.sha256, pre_state=pre_state.as_dict(),
-            effects=entry.effects,
+            effects=entry.effects, created=creating,
         )
         tx.changes.append(change)
         if dry_run:
             tx.journal("PREPARED", index=index, path=target, dry_run=True)
             continue
 
-        # 1. bounded pre-image backup
-        backup = os.path.join(tx.directory, "pre", f"{index:02d}-{os.path.basename(target)}")
-        shutil.copyfile(target, backup)
-        os.chmod(backup, 0o600)
-        change.pre_backup = os.path.relpath(backup, root)
-        tx.journal("PREPARED", index=index, path=target, pre_sha256=pre_state.sha256[:12],
-                   backup=change.pre_backup)
+        # 1. bounded pre-image backup (none exists for a file we are creating)
+        if not creating:
+            backup = os.path.join(tx.directory, "pre", f"{index:02d}-{os.path.basename(target)}")
+            shutil.copyfile(target, backup)
+            os.chmod(backup, 0o600)
+            change.pre_backup = os.path.relpath(backup, root)
+            tx.journal("PREPARED", index=index, path=target, pre_sha256=pre_state.sha256[:12],
+                       backup=change.pre_backup)
+        else:
+            tx.journal("PREPARED", index=index, path=target, created=True)
 
         # 2. re-render against live content, then validate the candidate
         ctx = actions_mod.ActionContext(
@@ -534,12 +586,24 @@ def _run_effects(tx: Transaction, selected: Sequence[plan_mod.PlanAction],
                 tx.journal("SERVICE_APPLIED", effect_ok=record)
 
 
+def _nft_effect_allowed(tokens: Sequence[str]) -> bool:
+    """`nft -f <our file>` or `nft delete table <family> <name>`. Nothing else."""
+    if len(tokens) == 3 and tokens[0] == "nft" and tokens[1] == "-f":
+        return re.fullmatch(r"/etc/[A-Za-z0-9._-]{1,64}\.nft", tokens[2]) is not None
+    if len(tokens) == 5 and tuple(tokens[:3]) == ("nft", "delete", "table"):
+        return tokens[3] in ("inet", "ip", "ip6", "arp", "bridge") and \
+            re.fullmatch(r"[a-z][a-z0-9_]{2,31}", tokens[4]) is not None
+    return False
+
+
 def _effect_allowed(kind: str, argv: Sequence[str]) -> bool:
     """Allowlist by kind and argv shape. No free-form commands, ever."""
     if not argv:
         return False
     tokens = [str(a) for a in argv]
     binary = tokens[0]
+    if kind in ("nft_load_file", "nft_delete_table"):
+        return _nft_effect_allowed(tokens)
     if binary not in ("docker", "docker-compose", "systemctl"):
         return False
     # Destructive subcommands are never a valid effect, whatever the kind says.
@@ -579,6 +643,29 @@ def _rollback_files(tx: Transaction, root: str, *, reason: str) -> Tuple[List[st
     tx.journal("ROLLING_BACK", reason=reason)
     for change in reversed(tx.changes):
         if not change.replaced:
+            continue
+        if change.created:
+            # The pre-image was "no file". Remove exactly what we wrote, and only
+            # if it still matches: a teammate's later edit must not be deleted.
+            current = util.capture_file_state(change.path)
+            if not current.exists:
+                tx.journal("ROLLING_BACK", already_removed=change.path)
+                change.replaced = False
+                continue
+            if change.post_sha256 and current.sha256 != change.post_sha256:
+                problems.append(
+                    f"{change.path} changed after this transaction: refusing to delete it. "
+                    "Resolve by hand.",
+                )
+                tx.journal("ROLLING_BACK", conflict=change.path, created=True)
+                continue
+            try:
+                os.unlink(change.path)
+            except OSError as exc:
+                problems.append(f"could not remove created file {change.path}: {exc}")
+                continue
+            tx.journal("ROLLING_BACK", removed=change.path, created=True)
+            restored.append(change.path)
             continue
         current = util.capture_file_state(change.path)
         if current.sha256 == change.pre_sha256:
@@ -684,7 +771,9 @@ def _run_recorded_effects(tx: Transaction) -> None:
     seen = set()
     for change in tx.changes:
         for effect in change.effects or []:
-            argv = [str(a) for a in (effect.get("argv") or [])]
+            # A rollback uses the recorded inverse when the action supplies one
+            # (loading a firewall table is not its own inverse; deleting it is).
+            argv = [str(a) for a in (effect.get("rollback_argv") or effect.get("argv") or [])]
             kind = str(effect.get("kind") or "")
             key = (kind, tuple(argv))
             if not argv or kind == "none" or key in seen:
@@ -721,6 +810,7 @@ def _tx_from_record(record: Dict[str, Any], directory: str) -> Transaction:
             metadata_warnings=list(item.get("metadata_warnings") or []),
             replaced=bool(item.get("replaced")),
             effects=list(item.get("effects") or []),
+            created=bool(item.get("created")),
         ))
     return Transaction(
         tx_id=str(record.get("tx_id", os.path.basename(directory))),
@@ -1049,6 +1139,11 @@ VERIFIERS = {
         str(params["path"]), contains=params.get("contains"),
         not_contains=params.get("not_contains"), exists=params.get("exists")),
     "compose.config": lambda params, **kw: _compose_config(str(params["file"])),
+    "nft.table": lambda params, **kw: nft_table_present(
+        table=str(params["table"]), family=str(params.get("family", "inet"))),
+    "sshd.option": lambda params, **kw: sshd_option(
+        option=str(params["option"]), value=str(params["value"]),
+        config=str(params.get("config", ""))),
 }
 
 
@@ -1064,6 +1159,43 @@ def _container_running(name: str) -> VerifyResult:
     running = res.stdout.strip() == "true"
     return VerifyResult("container.running", "liveness", running,
                         f"container {name} running={running}")
+
+
+def nft_table_present(*, table: str, family: str = "inet") -> VerifyResult:
+    """Prove the lockdown table is loaded in the *running* ruleset."""
+    if not re.fullmatch(r"[a-z][a-z0-9_]{2,31}", table) or family not in (
+        "inet", "ip", "ip6", "arp", "bridge", "netdev"
+    ):
+        return VerifyResult("nft.table", False, f"invalid table reference {family} {table}")
+    if not util.which("nft"):
+        return VerifyResult("nft.table", False, "nft is not installed on this host")
+    res = util.run(["nft", "list", "table", family, table], timeout=20, max_output=128 * 1024)
+    return VerifyResult(
+        "nft.table", "protocol", res.ok,
+        f"`nft list table {family} {table}` says the table is loaded" if res.ok
+        else (util.printable((res.stderr or res.stdout).strip(), 200)
+              or f"table {family} {table} is not loaded"),
+    )
+
+
+def sshd_option(*, option: str, value: str, config: str = "") -> VerifyResult:
+    """Check an effective sshd setting with `sshd -T` (includes drop-in files)."""
+    if not re.fullmatch(r"[A-Za-z]{3,64}", option) or not re.fullmatch(r"[A-Za-z0-9-]{1,32}", value):
+        return VerifyResult("sshd.option", False, "invalid option/value pair")
+    if not util.which("sshd"):
+        return VerifyResult("sshd.option", False, "sshd is not installed on this host")
+    argv = ["sshd", "-T"] + (["-f", config] if config else [])
+    res = util.run(argv, timeout=20, max_output=512 * 1024)
+    if not res.ok:
+        return VerifyResult("sshd.option", False,
+                            util.printable(res.stderr.strip(), 200) or "sshd -T failed")
+    needle = f"{option.lower()} {value.lower()}"
+    ok = needle in res.stdout.lower()
+    return VerifyResult(
+        "sshd.option", "protocol", ok,
+        f"`{' '.join(argv)}` reports {option}={value}" if ok
+        else f"the effective config does not report {needle}",
+    )
 
 
 def _compose_config(path: str) -> VerifyResult:

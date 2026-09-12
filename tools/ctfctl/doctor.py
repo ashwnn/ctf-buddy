@@ -90,11 +90,15 @@ def report(root: Optional[str] = None, *, quick: bool = False) -> Dict[str, Any]
 
     # Corpus
     stats = kbindex.stats(root)
+    cheatsheets = util.load_jsonl(os.path.join(util.repo_root(root), "kb", "manifest.jsonl"))
+    cheat_count = sum(
+        1 for card in cheatsheets if "cheatsheet" in (card.get("tags") or [])
+    )
     check(
         "corpus-cards",
         stats["cards_on_disk"] >= 1,
         f"{stats['cards_on_disk']} card(s) on disk "
-        f"({stats['cards_manifest']} in manifest)",
+        f"({stats['cards_manifest']} in manifest), {cheat_count} cheat sheet(s)",
         blocking=stats["cards_on_disk"] == 0,
     )
     check(
@@ -261,6 +265,12 @@ def render(report_data: Dict[str, Any]) -> str:
     )
     lines.append(
         f"  remote over ssh            {'yes' if summary.get('ready_for_remote') else 'no'}"
+    )
+    lines.append(
+        f"  honeypot listeners         yes (local, and remote on a declared target)"
+    )
+    lines.append(
+        f"  lockdown planning          yes (review-only; nft/sshd are checked on the target)"
     )
     lines.append(f"  fast-apply tested profiles {summary['tested_profiles'] or 'none'}")
     lines.append("")

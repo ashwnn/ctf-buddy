@@ -48,6 +48,17 @@ REQUEST_TIMEOUT = 10
 
 DEFAULT_PATHS = ["/admin", "/admin.php", "/.env", "/wp-login.php", "/backup.zip"]
 
+#: Banner presets for `--mode banner`. A banner decoy writes one fixed line on
+#: connect, reads a little of whatever the client sends, logs it and closes.
+#: It never pretends to speak a protocol, so it cannot be exploited itself.
+BANNER_PRESETS = {
+    "ssh": "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.4\r\n",
+    "smtp": "220 mail01.internal ESMTP Postfix\r\n",
+    "ftp": "220 FTP server ready.\r\n",
+    "telnet": "Ubuntu 22.04.3 LTS\r\nlogin: ",
+}
+MAX_BANNER_READ = 512
+
 DECOY_PAGE = (
     "<!doctype html><html><head><title>Sign in</title></head><body>"
     '<h1>Sign in</h1><form method="post"><input name="user"><input name="pass"'
@@ -335,13 +346,14 @@ class DecoyHandler(http.server.BaseHTTPRequestHandler):
         )
 
 
-class DecoyServer(BoundedThreadingHTTPServer):
-    allowed_paths: List[str] = []
-    log_path: str = ""
-    marker: str = ""
-    _lock = threading.Lock()
-    _written = 0
-    _stopped = False
+class BoundedLog:
+    """Append-only JSONL log with a hard byte budget, shared by every decoy mode."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self._lock = threading.Lock()
+        self._written = 0
+        self._stopped = False
 
     def record(self, event: Dict[str, Any]) -> None:
         with self._lock:
@@ -369,11 +381,76 @@ class DecoyServer(BoundedThreadingHTTPServer):
                     + "\n"
                 )
             try:
-                with open(self.log_path, "a", encoding="utf-8") as fh:
+                with open(self.path, "a", encoding="utf-8") as fh:
                     fh.write(line)
             except OSError:
                 pass
             self._written += len(line)
+
+
+class DecoyServer(BoundedThreadingHTTPServer):
+    allowed_paths: List[str] = []
+    marker: str = ""
+    log: "BoundedLog"
+
+    def record(self, event: Dict[str, Any]) -> None:
+        self.log.record(event)
+
+
+class BannerServer(socketserver.ThreadingTCPServer):
+    """TCP banner decoy: accept, speak first, log a bounded peek, close."""
+
+    daemon_threads = True
+    allow_reuse_address = False
+    request_queue_size = 16
+    banner: str = BANNER_PRESETS["ssh"]
+    marker: str = ""
+    log: "BoundedLog"
+    _slots = threading.Semaphore(MAX_THREADS)
+
+    def record(self, event: Dict[str, Any]) -> None:
+        self.log.record(event)
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        super().process_request(request, client_address)
+
+
+class BannerHandler(socketserver.BaseRequestHandler):
+    def handle(self) -> None:  # noqa: D102 - socketserver entry point
+        server: BannerServer = self.server  # type: ignore[assignment]
+        data = b""
+        try:
+            self.request.settimeout(REQUEST_TIMEOUT)
+            self.request.sendall(server.banner.encode("utf-8", "replace"))
+            data = self.request.recv(MAX_BANNER_READ)
+        except OSError:
+            pass
+        finally:
+            try:
+                self.request.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        server.record(
+            {
+                "event": "decoy-banner",
+                "decoy": True,
+                "banner": util.printable(server.banner, 120),
+                "bytes_in": len(data),
+                # Attacker input is escaped and length-capped before it reaches the log.
+                "preview": util.printable(data.decode("utf-8", "replace"), 200),
+                "client": self.client_address[0],
+                "marker": server.marker,
+            }
+        )
 
 
 def apply_rlimits() -> List[str]:
@@ -401,19 +478,27 @@ def apply_rlimits() -> List[str]:
     return notes
 
 
-def serve(port: int, bind: str, paths: List[str], log_path: str, marker: str) -> int:
+def serve(port: int, bind: str, paths: List[str], log_path: str, marker: str,
+          mode: str = "http", banner: str = "") -> int:
     notes = apply_rlimits()
-    server = DecoyServer((bind, port), DecoyHandler)
-    server.allowed_paths = paths
-    server.log_path = log_path
+    log = BoundedLog(log_path)
+    if mode == "banner":
+        server: Any = BannerServer((bind, port), BannerHandler)
+        server.banner = banner or BANNER_PRESETS["ssh"]
+    else:
+        server = DecoyServer((bind, port), DecoyHandler)
+        server.allowed_paths = paths
+    server.log = log
     server.marker = marker
     server.record(
         {
             "event": "decoy-started",
             "decoy": True,
+            "mode": "banner" if mode == "banner" else "http",
             "bind": bind,
             "port": port,
-            "paths": paths,
+            "paths": paths if mode != "banner" else [],
+            "banner": server.banner if mode == "banner" else "",
             "rlimits": notes,
             "warning": "decoy events are marked with decoy=true and X-Decoy: ctfctl",
         }
@@ -436,7 +521,8 @@ def state_path(root: Optional[str] = None) -> str:
 
 
 def start(
-    root: Optional[str], *, port: Optional[int] = None, bind: Optional[str] = None
+    root: Optional[str], *, port: Optional[int] = None, bind: Optional[str] = None,
+    mode: str = "http", banner: str = "",
 ) -> Dict[str, Any]:
     root = root or util.repo_root()
     policy = load_policy(root)
@@ -485,7 +571,12 @@ def start(
         marker,
         "--paths",
         ",".join(policy.allowed_paths),
+        "--mode",
+        mode,
     ]
+    resolved_banner = BANNER_PRESETS.get(banner.strip().lower(), banner) if banner else ""
+    if mode == "banner":
+        argv += ["--banner", resolved_banner or BANNER_PRESETS["ssh"]]
     env = dict(os.environ)
     env["PYTHONPATH"] = (
         os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -509,6 +600,8 @@ def start(
         "pid": proc.pid,
         "port": chosen,
         "bind": bind_address,
+        "mode": mode,
+        "banner": resolved_banner if mode == "banner" else "",
         "log_path": os.path.relpath(log_path, root).replace(os.sep, "/"),
         "marker": marker,
         "started_at": util.iso_now(),
@@ -520,41 +613,7 @@ def start(
 
 
 def _pid_alive(pid: int) -> bool:
-    """Non-destructive liveness check.
-
-    POSIX: signal 0 is a pure permission/existence probe. Windows: os.kill is
-    destructive for every signal (it maps to TerminateProcess), and calling it
-    on a process that is mid-termination can block, so query the exit code
-    through the Win32 API instead.
-    """
-    if pid <= 0:
-        return False
-    if os.name == "nt":
-        return _pid_alive_windows(pid)
-    try:
-        os.kill(pid, 0)
-        return True
-    except OSError:
-        return False
-
-
-def _pid_alive_windows(pid: int) -> bool:
-    import ctypes
-    from ctypes import wintypes
-
-    process_query_limited_information = 0x1000
-    still_active = 259
-    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-    handle = kernel32.OpenProcess(process_query_limited_information, False, int(pid))
-    if not handle:
-        return False
-    try:
-        code = wintypes.DWORD()
-        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
-            return False
-        return code.value == still_active
-    finally:
-        kernel32.CloseHandle(handle)
+    return util.pid_alive(pid)
 
 
 def status(root: Optional[str] = None) -> Dict[str, Any]:
@@ -658,9 +717,15 @@ def _main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--paths", default=",".join(DEFAULT_PATHS))
     parser.add_argument("--log", required=True)
     parser.add_argument("--marker", default="decoy")
+    parser.add_argument("--mode", choices=["http", "banner"], default="http")
+    parser.add_argument("--banner", default="",
+                        help="banner text, or a preset name: "
+                             + ", ".join(sorted(BANNER_PRESETS)))
     args = parser.parse_args(argv)
     paths = [p.strip() for p in args.paths.split(",") if p.strip()]
-    return serve(args.port, args.bind, paths, args.log, args.marker)
+    banner = BANNER_PRESETS.get(args.banner.strip().lower(), args.banner)
+    return serve(args.port, args.bind, paths, args.log, args.marker,
+                 args.mode, banner)
 
 
 def summarize(state: Dict[str, Any]) -> str:

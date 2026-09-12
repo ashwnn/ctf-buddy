@@ -1259,6 +1259,351 @@ def plan(
     return payload
 
 
+# --------------------------------------------------------------------------
+# Honeypot (decoy listeners on the target)
+# --------------------------------------------------------------------------
+_LOG_REL_RE = re.compile(r"^captures/honeypot-[0-9]{1,5}-[0-9]{8}T[0-9]{6}Z\.jsonl$")
+
+HONEYPOT_ACTIONS = ("start", "status", "logs", "stop", "collect")
+
+
+def honeypot(
+    conn: Conn,
+    action: str,
+    *,
+    port: Optional[int] = None,
+    mode: str = "http",
+    bind: str = "0.0.0.0",
+    banner: str = "",
+    lines: int = 50,
+    all_listeners: bool = False,
+    yes: bool = False,
+    root: Optional[str] = None,
+) -> Tuple[int, Dict[str, Any]]:
+    """Drive the remote honeypot lifecycle. Mutations need policy ack + --yes."""
+    root = root or util.repo_root()
+    if action not in HONEYPOT_ACTIONS:
+        raise util.UsageError(f"unknown honeypot action {action!r}",
+                              hint="actions: " + ", ".join(HONEYPOT_ACTIONS))
+    require_declaration(conn.host, root)
+    if action in ("start", "stop"):
+        if not is_policy_acknowledged(root):
+            raise util.CtfError(
+                "the event policy is not acknowledged on this machine",
+                hint=f"re-run: ctfctl targets declare {conn.host} --label <label> --ack-policy",
+            )
+        if not yes:
+            raise util.CtfError(
+                f"refusing to {action} a honeypot without --yes",
+                hint="a honeypot is a mutation on a scored host: confirm with --yes after "
+                     "checking the port is unused by every scored service",
+            )
+    _prepare(conn, root=root)
+    args = ["honeypot", action, "--json"]
+    if action == "start":
+        if not port:
+            raise util.UsageError("honeypot start needs --port <UNUSED_PORT>")
+        args += ["--port", str(int(port)), "--mode", mode, "--bind", bind]
+        if banner:
+            args += ["--banner", banner]
+    if action == "logs":
+        args += ["--lines", str(int(lines))]
+        if port:
+            args += ["--port", str(int(port))]
+    if action == "stop":
+        if port:
+            args += ["--port", str(int(port))]
+        elif all_listeners:
+            args.append("--all")
+        else:
+            raise util.UsageError("honeypot stop needs --port or --all")
+    result = _remote_ctfctl(conn, args, timeout=max(conn.timeout, 90.0))
+    payload = _maybe_json(result.stdout)
+    if payload is None:
+        payload = {"ok": False,
+                   "stderr": util.redact(result.stderr.strip())[-600:]}
+    payload["host"] = conn.target
+    return result.returncode, payload
+
+
+def render_honeypot_status(payload: Dict[str, Any]) -> str:
+    host = payload.get("host") or "target"
+    running = payload.get("running") or []
+    stopped = payload.get("stopped") or []
+    if not running and not stopped:
+        return (f"{host}: no honeypot listeners. Start one with: ctfctl remote honeypot "
+                f"{host} start --port <UNUSED_PORT> --yes")
+    lines = [f"{host}: {len(running)} listening, {len(stopped)} stopped"]
+    for entry in running:
+        lines.append(
+            f"  port {entry.get('port'):<6} {entry.get('mode')} bind={entry.get('bind')} "
+            f"pid={entry.get('pid')} state={entry.get('state')}"
+        )
+        lines.append(f"         log {entry.get('log_path')}")
+        if entry.get("mode") == "banner" and entry.get("banner"):
+            lines.append(f"         banner {entry.get('banner')!r}")
+    for entry in stopped:
+        lines.append(f"  port {entry.get('port'):<6} stopped (process gone)")
+    lines.append("Hits carry decoy=true. Observation only: never bind a scored port.")
+    return "\n".join(lines)
+
+
+def render_honeypot_logs(payload: Dict[str, Any]) -> str:
+    lines: List[str] = []
+    for entry in payload.get("listeners") or []:
+        lines.append(
+            f"port {entry.get('port')} ({entry.get('mode')}) "
+            f"running={entry.get('running')} log={entry.get('log_path')}"
+        )
+        events = entry.get("lines") or []
+        if not events:
+            lines.append("  (no events yet)")
+        for raw in events:
+            try:
+                event = json.loads(raw)
+            except json.JSONDecodeError:
+                lines.append("  " + util.printable(raw, 200))
+                continue
+            detail = event.get("path") or event.get("preview") or ""
+            lines.append("  " + util.printable(
+                f"{event.get('at')} {event.get('event')} client={event.get('client', '')} "
+                f"{detail} {event.get('user_agent', '')}".strip(), 240))
+    return "\n".join(lines) or "no honeypot listeners"
+
+
+def honeypot_collect(conn: Conn, *, root: Optional[str] = None) -> Dict[str, Any]:
+    """Copy every remote honeypot log into the local captures/ directory.
+
+    Read-only on the target: `cat` of paths this toolkit created, validated
+    against the honeypot log naming scheme before they reach an ssh argv.
+    """
+    root = root or util.repo_root()
+    require_declaration(conn.host, root)
+    _prepare(conn, root=root)
+    code, status = honeypot(conn, "status", root=root)
+    if code != util.EXIT_OK:
+        return {"ok": False, "host": conn.target, "error": status.get("stderr") or
+                "honeypot status failed on the target", "collected": []}
+    collected: List[Dict[str, Any]] = []
+    for entry in status.get("running", []) + status.get("stopped", []):
+        rel = str(entry.get("log_path") or "")
+        if not _LOG_REL_RE.match(rel):
+            continue
+        result = SSH_RUNNER(
+            ssh_argv(conn, f'cat "$HOME/{REMOTE_DIRNAME}/{rel}"'),
+            timeout=conn.timeout,
+            max_output=4 * 1024 * 1024,
+        )
+        if result.returncode != 0 or not result.stdout:
+            collected.append({"port": entry.get("port"), "log_path": rel,
+                              "bytes": 0, "error": "not collected"})
+            continue
+        local = os.path.join(
+            util.captures_dir(root=root),
+            f"honeypot-{conn.host}-{util.utc_stamp()}-{int(entry.get('port') or 0)}.jsonl",
+        )
+        util.write_text_atomic(local, result.stdout, mode=0o600)
+        collected.append({
+            "port": entry.get("port"),
+            "remote_log": rel,
+            "bytes": len(result.stdout),
+            "saved_to": os.path.relpath(local, root).replace(os.sep, "/"),
+        })
+    return {"ok": True, "host": conn.target, "collected": collected}
+
+
+# --------------------------------------------------------------------------
+# Lockdown planning (operator-supplied allowlist, review-only actions)
+# --------------------------------------------------------------------------
+CLIENT_IP_SCRIPT = r"""
+set -- $SSH_CONNECTION
+printf 'client_ip=%s\n' "${1:-}"
+printf 'ssh_user=%s\n' "$(id -un 2>/dev/null || echo unknown)"
+printf 'uid=%s\n' "$(id -u 2>/dev/null || echo unknown)"
+home="${HOME:-/root}"
+printf 'home=%s\n' "$home"
+for f in "$home/.ssh/authorized_keys" /root/.ssh/authorized_keys; do
+  if [ -s "$f" ]; then printf 'authorized_keys=%s\n' "$f"; fi
+done
+command -v nft >/dev/null 2>&1 && printf 'nft=present\n' || printf 'nft=absent\n'
+command -v sshd >/dev/null 2>&1 && printf 'sshd=present\n' || printf 'sshd=absent\n'
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+  for unit in ssh sshd; do
+    systemctl list-unit-files "$unit.service" --no-legend --no-pager 2>/dev/null | \
+      grep -q "^$unit\.service" && printf 'unit=%s\n' "$unit"
+  done
+fi
+[ -f /etc/nftables.conf ] && printf 'nftables_conf=present\n'
+printf 'sshd_config=%s\n' "$( [ -f /etc/ssh/sshd_config ] && echo /etc/ssh/sshd_config || echo '' )"
+"""
+
+
+def lockdown_facts(conn: Conn, *, root: Optional[str] = None) -> Dict[str, Any]:
+    """Read-only: what the target can tell us about its own access paths."""
+    result = _ssh(conn, "sh -s", input_text=CLIENT_IP_SCRIPT, timeout=30.0,
+                  max_output=64 * 1024, what="lockdown facts")
+    facts: Dict[str, Any] = {"client_ip": "", "authorized_keys": [], "units": []}
+    for line in result.stdout.splitlines():
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if key == "client_ip":
+            facts["client_ip"] = value
+        elif key in ("ssh_user", "uid", "home", "nft", "sshd", "sshd_config"):
+            facts[key] = value
+        elif key == "unit":
+            facts["units"].append(value)
+        elif key == "authorized_keys":
+            facts["authorized_keys"].append(value)
+    return facts
+
+
+def lockdown(
+    conn: Conn,
+    *,
+    operator_cidr: str = "",
+    allow_cidrs: Sequence[str] = (),
+    allow_ports: Sequence[int] = (),
+    allow_udp_ports: Sequence[int] = (),
+    include_firewall: bool = True,
+    include_ssh: bool = True,
+    log_drops: bool = False,
+    sshd_port: int = 22,
+    root: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Pull a review-only lockdown plan built on the target.
+
+    The target supplies the ports it currently listens on and the operator
+    supplies the allowlist; both end up in the plan the operator reviews.
+    """
+    import ipaddress
+
+    root = root or util.repo_root()
+    require_declaration(conn.host, root)
+    install_state = _prepare(conn, root=root)
+    facts = lockdown_facts(conn, root=root)
+    client_ip = str(facts.get("client_ip") or "")
+    if not operator_cidr:
+        if not client_ip:
+            raise util.CtfError(
+                "could not read the operator's SSH source address from the target",
+                hint=f"pass --operator-cidr explicitly (your address as the target sees it); "
+                     f"this value is added to the allowlist so the lockdown cannot lock you out",
+            )
+        operator_cidr = client_ip
+    try:
+        network = ipaddress.ip_network(operator_cidr.split("/")[0] + (
+            "/" + operator_cidr.split("/", 1)[1] if "/" in operator_cidr else ""), strict=False)
+    except ValueError:
+        raise util.CtfError(f"--operator-cidr {operator_cidr!r} is not an IP address or network")
+    normalized_operator = str(network)
+
+    # Every port the target currently listens on stays reachable; a scored
+    # service the operator forgot is not worth a zero.
+    listen_ports: List[int] = []
+    probe_path = os.path.join(_state_dir(conn, root), "probe-latest.json")
+    probe = util.load_json(probe_path, {}) or {}
+    for listener in probe.get("listeners") or []:
+        try:
+            listen_ports.append(int(listener.get("port")))
+        except (TypeError, ValueError):
+            continue
+    ports = sorted(set(listen_ports + [int(p) for p in allow_ports] + [int(sshd_port)]))
+    cidrs = [str(c) for c in allow_cidrs if str(c).strip()]
+    cidrs.append(normalized_operator)
+
+    args = [
+        "lockdown", "plan", "--json",
+        "--operator-cidr", normalized_operator,
+        "--allow-ports", ",".join(str(p) for p in ports),
+    ]
+    for cidr in dict.fromkeys(cidrs):
+        args += ["--allow-cidr", cidr]
+    if allow_udp_ports:
+        args += ["--allow-udp-ports", ",".join(str(p) for p in allow_udp_ports)]
+    if log_drops:
+        args.append("--log-drops")
+    if not include_firewall:
+        args.append("--no-firewall")
+    if not include_ssh:
+        args.append("--no-ssh")
+    if facts.get("sshd_config"):
+        args += ["--sshd-path", str(facts["sshd_config"])]
+    keys = [str(k) for k in facts.get("authorized_keys") or []]
+    if keys:
+        args += ["--authorized-keys", keys[0]]
+    if facts.get("units"):
+        args += ["--service-unit", str(facts["units"][0])]
+
+    result = _remote_ctfctl(conn, args, timeout=max(conn.timeout, 120.0))
+    payload = _maybe_json(result.stdout)
+    if payload is None:
+        raise util.CtfError(
+            f"remote lockdown plan on {conn.target} produced no readable JSON",
+            hint=util.redact(result.stderr.strip())[-300:] or "check remote python3 and nft",
+        )
+    plans = list(payload.get("plans") or [])
+    matched = [p for p in plans if (p.get("detection") or {}).get("matched")]
+    authorized = False
+    if matched and is_policy_acknowledged(root):
+        _mirror_authorization(conn, matched[0], root)
+        result = _remote_ctfctl(conn, args, timeout=max(conn.timeout, 120.0))
+        rebuilt = _maybe_json(result.stdout) or payload
+        plans = list(rebuilt.get("plans") or plans)
+        matched = [p for p in plans if (p.get("detection") or {}).get("matched")]
+        payload = rebuilt
+        authorized = True
+
+    state = _state_dir(conn, root)
+    _save_json(os.path.join(state, "lockdown-latest.json"), payload)
+    plans_dir = os.path.join(state, "plans")
+    os.makedirs(plans_dir, mode=0o700, exist_ok=True)
+    for entry in matched:
+        plan_id = str(entry.get("plan_id") or "")
+        if plan_id:
+            _save_json(os.path.join(plans_dir, _plan_filename(plan_id)), entry)
+    payload["remote"] = {
+        "host": conn.target,
+        "toolkit": install_state.get("fingerprint", ""),
+        "installed": install_state.get("installed", False),
+        "authorization_mirrored": authorized,
+        "policy_acknowledged": is_policy_acknowledged(root),
+        "operator_cidr": normalized_operator,
+        "allowed_ports": ports,
+        "listen_ports": sorted(set(listen_ports)),
+        "client_ip": client_ip,
+    }
+    return payload
+
+
+# --------------------------------------------------------------------------
+# Access-preserving safety net
+# --------------------------------------------------------------------------
+def touches_access(plan_json: Dict[str, Any]) -> bool:
+    """True when a plan can plausibly cut the operator's own ssh session."""
+    for action in plan_json.get("actions") or []:
+        path = str(action.get("target_path") or "").lower()
+        if any(needle in path for needle in ("sshd", "ssh_config", "nft", "iptables",
+                                             "firewall", "nftables")):
+            return True
+        for effect in action.get("effects") or []:
+            kind = str(effect.get("kind") or "")
+            argv = " ".join(str(a) for a in (effect.get("argv") or []))
+            if kind.startswith("nft") or "ssh" in argv.lower():
+                return True
+    return False
+
+
+def reconnect_probe(conn: Conn, *, timeout: float = 15.0) -> Dict[str, Any]:
+    """Open a fresh SSH connection from the operator. Never raises."""
+    argv = ssh_argv(conn, "true", batch=True)
+    result = SSH_RUNNER(argv, timeout=timeout + 10.0, max_output=4096)
+    return {
+        "ok": result.returncode == 0,
+        "returncode": result.returncode,
+        "detail": util.redact((result.stderr or result.stdout).strip())[-300:],
+    }
+
+
 def _plan_filename(plan_id: str) -> str:
     """Plan ids are `sha256:<hex>`; the colon is illegal in Windows filenames."""
     return str(plan_id).replace("sha256:", "").replace(":", "_") + ".json"
@@ -1341,7 +1686,47 @@ def apply(
     payload = _maybe_json(result.stdout)
     if payload is None:
         payload = {"ok": False, "stderr": util.redact(result.stderr.strip())[-600:]}
+    if (payload.get("phase") == "COMMITTED" and not payload.get("dry_run")
+            and touches_access(entry)):
+        payload["access_recheck"] = _access_recheck(conn, entry, payload, root=root)
     return result.returncode, payload
+
+
+def _access_recheck(conn: Conn, plan_json: Dict[str, Any], payload: Dict[str, Any],
+                    *, root: str) -> Dict[str, Any]:
+    """After a change that can cut ssh, prove the operator can still get in.
+
+    The health checks run *on the target*; this is the only check that runs from
+    the operator's side, so it is the one that catches a firewall or sshd
+    mistake that the target cannot see. On failure the transaction is rolled
+    back immediately (which itself needs the connection, so a console may still
+    be required -- that requirement is stated in the plan before apply).
+    """
+    probe = reconnect_probe(conn)
+    if probe["ok"]:
+        probe["action"] = "reconnected; no rollback needed"
+        return probe
+    tx_id = str(payload.get("tx_id") or "")
+    rolled_back: Optional[Dict[str, Any]] = None
+    if tx_id:
+        try:
+            code, result = rollback(conn, tx_id=tx_id, yes=True, root=root)
+            rolled_back = {"attempted": True, "ok": code == util.EXIT_OK, "result": result}
+        except util.CtfError as exc:
+            rolled_back = {"attempted": True, "ok": False, "error": str(exc)}
+    probe["action"] = (
+        "rollback attempted automatically" if rolled_back
+        else "no transaction id in the apply result: roll back by hand"
+    )
+    if rolled_back:
+        probe["rollback"] = rolled_back
+    probe["recovery"] = (
+        "If ssh is unreachable, use the out-of-band console: `ctfctl rollback "
+        f"{tx_id or '<tx-id>'} --yes` on the host, or delete the nftables table with "
+        "`nft delete table inet ctfctl_lockdown` and restore the sshd_config backup "
+        "under state/tx/"
+    )
+    return probe
 
 
 def verify(
@@ -1504,3 +1889,274 @@ def remote_files(
     else:
         print(files_mod.render_matches(payload))
     return result.returncode
+
+
+
+
+# --------------------------------------------------------------------------
+# One-command pipeline: probe -> discover -> plan -> (apply) -> (honeypot)
+# --------------------------------------------------------------------------
+HONEYPOT_PORT_CANDIDATES = (2222, 8080, 8443, 3306, 5432, 6379, 9200, 10000)
+
+
+def auto(
+    conn: Conn,
+    *,
+    apply_mutations: bool = False,
+    approve_review: bool = False,
+    honeypot_port: int = 0,
+    honeypot_mode: str = "http",
+    honeypot_banner: str = "",
+    yes: bool = False,
+    root: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Run the whole read-only pipeline for one IP, then optionally act.
+
+    Read-only by default: probe, discovery, plan, bounded file recon and a
+    written report. Mutations happen only when asked for *and* confirmed with
+    --yes, and they reuse exactly the same gated paths as the individual
+    commands (declaration, policy, review-only approval, auto-rollback).
+    """
+    root = root or util.repo_root()
+    require_declaration(conn.host, root)
+    if (apply_mutations or honeypot_port) and not yes:
+        raise util.CtfError(
+            "refusing to change anything without --yes",
+            hint="the read-only pipeline runs by itself; add --yes when you have read the plan "
+                 "and want the mutations applied",
+        )
+    report: Dict[str, Any] = {
+        "schema": "ctfctl.auto/1",
+        "host": conn.target,
+        "started_at": util.iso_now(),
+        "mutations_requested": bool(apply_mutations or honeypot_port),
+        "steps": {},
+        "gaps": [],
+        "next_actions": [],
+    }
+
+    # 1. Read-only probe: works with only a POSIX shell on the target.
+    report["steps"]["probe"] = probe(conn, save=True, root=root)
+
+    # 2. Toolkit + full discovery + plan (needs python3 on the target).
+    try:
+        install_state = install(conn, root=root)
+        report["steps"]["install"] = {
+            "fingerprint": install_state.get("fingerprint"),
+            "installed": install_state.get("installed"),
+        }
+        result = _remote_ctfctl(conn, ["discover", "--json"],
+                                timeout=max(conn.timeout, 120.0))
+        report["steps"]["discover"] = _maybe_json(result.stdout) or {}
+        report["steps"]["plan"] = plan(conn, root=root)
+    except util.CtfError as exc:
+        report["gaps"].append("planning needs python3 on the target: " + str(exc))
+        report["next_actions"].append(
+            f"install python3 on {conn.target}, then re-run: ctfctl remote plan {conn.target}"
+        )
+
+    # 3. Bounded read-only file recon of the usual application roots.
+    roots = ("/var/www", "/srv", "/opt", "/home")
+    listings: Dict[str, Any] = {}
+    for path in roots:
+        try:
+            result = _remote_ctfctl(
+                conn, ["files", "list", path, "--depth", "1", "--limit", "50", "--json"],
+                timeout=max(conn.timeout, 60.0),
+            )
+            payload = _maybe_json(result.stdout)
+            if payload:
+                listings[path] = payload
+        except util.CtfError as exc:
+            listings[path] = {"error": str(exc)}
+    report["steps"]["files"] = listings
+
+    # 4. Free-port suggestions for a honeypot, from what the probe actually saw.
+    seen = {
+        int(item.get("port"))
+        for item in (report["steps"]["probe"].get("listeners") or [])
+        if str(item.get("port", "")).isdigit()
+    }
+    free = [p for p in HONEYPOT_PORT_CANDIDATES if p not in seen]
+    report["honeypot_suggestions"] = free[:3]
+    if free:
+        report["next_actions"].append(
+            f"distract attackers without touching a scored port: ctfctl remote honeypot "
+            f"{conn.target} start --port {free[0]} --yes"
+        )
+
+    # 5. Optional mutations, through the normal gated paths.
+    if apply_mutations:
+        plans = report["steps"].get("plan") or {}
+        matched = [
+            entry for entry in (plans.get("plans") or [])
+            if (entry.get("detection") or {}).get("matched") and entry.get("actions")
+        ]
+        if not matched:
+            report["steps"]["apply"] = {
+                "applied": False,
+                "reason": "no profile with actions matched this host; see the plan evidence",
+            }
+        elif not is_policy_acknowledged(root):
+            raise util.CtfError(
+                "the event policy is not acknowledged on this machine",
+                hint=f"re-run: ctfctl targets declare {conn.host} --label <label> --ack-policy",
+            )
+        else:
+            entry = matched[0]
+            code, payload = apply(
+                conn, str(entry.get("plan_id") or "latest"), yes=True,
+                approve_review=approve_review, root=root,
+            )
+            report["steps"]["apply"] = payload
+            report["apply_exit_code"] = code
+            if code != util.EXIT_OK:
+                report["next_actions"].append(
+                    "read the apply result before retrying: nothing is retried automatically"
+                )
+
+    if honeypot_port:
+        code, payload = honeypot(
+            conn, "start", port=int(honeypot_port), mode=honeypot_mode,
+            banner=honeypot_banner, yes=True, root=root,
+        )
+        report["steps"]["honeypot"] = payload
+        report["honeypot_exit_code"] = code
+        if code != util.EXIT_OK:
+            report["next_actions"].append(
+                "the honeypot did not start: pick a free port and check the target's firewall"
+            )
+
+    # 6. Persist a report an operator can read and hand over.
+    report["finished_at"] = util.iso_now()
+    reports_dir = os.path.join(root, "state", "reports")
+    os.makedirs(reports_dir, mode=0o700, exist_ok=True)
+    safe_host = re.sub(r"[^A-Za-z0-9._-]", "_", conn.host)
+    stamp = util.utc_stamp()
+    json_path = os.path.join(reports_dir, f"auto-{safe_host}-{stamp}.json")
+    util.write_text_atomic(json_path, util.dump_json(report) + "\n", mode=0o600)
+    md_path = os.path.join(reports_dir, f"auto-{safe_host}-{stamp}.md")
+    util.write_text_atomic(md_path, render_auto_report(report), mode=0o600)
+    report["report_json"] = os.path.relpath(json_path, root).replace(os.sep, "/")
+    report["report_markdown"] = os.path.relpath(md_path, root).replace(os.sep, "/")
+    return report
+
+
+def render_auto_report(report: Dict[str, Any]) -> str:
+    """Human-readable handover for one `remote auto` run."""
+    host = report.get("host")
+    probe_payload = (report.get("steps") or {}).get("probe") or {}
+    lines = [
+        f"# Recon report - {host}",
+        "",
+        f"Run at {report.get('started_at')} by `ctfctl remote auto`.",
+        "Read-only unless a step below says otherwise.",
+        "",
+        "## Identity",
+        "",
+    ]
+    identity = probe_payload.get("identity") or {}
+    lines.append(f"- **host**: {probe_payload.get('host')}")
+    for key in ("hostname", "kernel", "user", "uid"):
+        if identity.get(key):
+            lines.append(f"- **{key}**: {identity[key]}")
+    for line in (identity.get("os_release") or [])[:2]:
+        lines.append(f"- **os**: {line}")
+    if identity.get("init"):
+        lines.append(f"- **init**: {identity['init']}")
+    lines += ["", "## Listeners", ""]
+    listeners = probe_payload.get("listeners") or []
+    if not listeners:
+        lines.append("No listeners were parsed from the probe (check the gaps below).")
+    else:
+        lines += ["| port | address | proto | process | who can reach it |", "|---|---|---|---|---|"]
+        for item in listeners[:60]:
+            address = str(item.get("address") or "")
+            reach = ("loopback only" if address.startswith("127.") or address == "::1"
+                     else "any network that can route to this host")
+            lines.append(
+                f"| {item.get('port')} | {address} "
+                f"| {item.get('proto', '')} "
+                f"| {item.get('process') or item.get('pid') or ''} "
+                f"| {reach} |"
+            )
+    containers = probe_payload.get("containers") or []
+    if containers:
+        lines += ["", "## Containers", ""]
+        for item in containers[:20]:
+            lines.append(
+                f"- {item.get('names') or item.get('name')}  image={item.get('image')}  "
+                f"ports={item.get('ports')}"
+            )
+    firewall_lines = probe_payload.get("firewall_lines") or []
+    if firewall_lines:
+        lines += ["", "## Firewall posture (read-only)", "", "```"]
+        lines += [util.printable(line, 200) for line in firewall_lines[:20]]
+        lines.append("```")
+    gaps = list(report.get("gaps") or [])
+    probe_gaps = probe_payload.get("gaps") or []
+    gaps += [f"probe: {gap}" for gap in probe_gaps[:10]]
+    lines += ["", "## Evidence gaps", ""]
+    lines += [f"- {gap}" for gap in gaps] or ["- none reported"]
+    suggestions = report.get("honeypot_suggestions") or []
+    if suggestions:
+        lines += [
+            "",
+            "## Suggested honeypot ports",
+            "",
+            "Unused by anything the probe saw: " + ", ".join(str(p) for p in suggestions),
+        ]
+    plan_payload = (report.get("steps") or {}).get("plan") or {}
+    matched = [
+        entry for entry in (plan_payload.get("plans") or [])
+        if (entry.get("detection") or {}).get("matched")
+    ]
+    lines += ["", "## Plans", ""]
+    if not matched:
+        lines.append(
+            "No shipped profile matched. The probe evidence is the deliverable; do not improvise "
+            "a patch from it."
+        )
+    for entry in matched:
+        lines.append(f"### {entry.get('profile_id')} (plan {entry.get('plan_id')})")
+        for action in entry.get("actions") or []:
+            skip = action.get("skipped_reason")
+            lines.append(
+                f"- {action.get('key')}: {action.get('action_id')}"
+                + (f" - skipped: {skip}" if skip else f" [{action.get('eligibility')}]")
+            )
+    applied = (report.get("steps") or {}).get("apply")
+    if applied:
+        lines += [
+            "",
+            "## Apply",
+            "",
+            f"phase={applied.get('phase')} ok={applied.get('ok')} tx={applied.get('tx_id')}",
+        ]
+        recheck = applied.get("access_recheck")
+        if recheck:
+            lines.append(
+                f"- operator reconnect after the change: {recheck.get('ok')} "
+                f"({recheck.get('action')})"
+            )
+    honeypot_state = (report.get("steps") or {}).get("honeypot")
+    if honeypot_state:
+        lines += ["", "## Honeypot", ""]
+        if honeypot_state.get("port"):
+            lines.append(
+                f"- running on port {honeypot_state.get('port')} "
+                f"({honeypot_state.get('mode')}), log {honeypot_state.get('log_path')}"
+            )
+        else:
+            lines.append(f"- not started: {util.printable(str(honeypot_state), 300)}")
+    next_actions = report.get("next_actions") or []
+    if next_actions:
+        lines += ["", "## Next actions", ""] + [f"- {item}" for item in next_actions]
+    lines += [
+        "",
+        "---",
+        "",
+        "Every functional check in this report is *our* check; it is not proof that an unseen "
+        "organizer checker passes.",
+    ]
+    return "\n".join(lines) + "\n"

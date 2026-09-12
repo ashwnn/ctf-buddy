@@ -11,7 +11,8 @@ Modules:
     plan      detection, planning, stale-check and diff generation
     apply     transactional mutation engine with rollback
     observe   bounded log and packet observation
-    decoy     optional minimal unprivileged HTTP decoy
+    decoy     optional minimal unprivileged HTTP decoy (http and banner modes)
+    honeypot  multi-listener honeypot lifecycle for a box you own
     doctor    offline dependency and capability report
 """
 
@@ -22,6 +23,7 @@ __all__ = [
     "discover",
     "doctor",
     "files",
+    "honeypot",
     "kbindex",
     "observe",
     "plan",
@@ -31,4 +33,4 @@ __all__ = [
     "util",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

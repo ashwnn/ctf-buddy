@@ -20,7 +20,8 @@ from . import (
     decoy as decoy_mod,
     discover as discover_mod,
 )
-from . import doctor as doctor_mod, files as files_mod, kbindex, observe as observe_mod
+from . import doctor as doctor_mod, files as files_mod, honeypot as honeypot_mod
+from . import kbindex, observe as observe_mod
 from . import (
     plan as plan_mod,
     platformx,
@@ -159,6 +160,8 @@ def build_parser() -> argparse.ArgumentParser:
     d = decoy_sub.add_parser("start")
     d.add_argument("--port", type=int)
     d.add_argument("--bind")
+    d.add_argument("--mode", choices=["http", "banner"], default="http")
+    d.add_argument("--banner", default="", help="custom text or a preset name")
     d.add_argument("--json", action="store_true")
     d = decoy_sub.add_parser("status")
     d.add_argument("--json", action="store_true")
@@ -210,6 +213,13 @@ def build_parser() -> argparse.ArgumentParser:
         "open", help="print the local path of a search hit (for $EDITOR)"
     )
     k.add_argument("identifier")
+    k = kb_sub.add_parser(
+        "cheat", help="quick-reference cards (no query lists them all)"
+    )
+    k.add_argument("topic", nargs="?", default="",
+                   help="topic to match, e.g. 'web', 'pcap', 'lockdown'")
+    k.add_argument("--limit", type=int, default=20)
+    k.add_argument("--json", action="store_true")
 
     # profiles
     p = sub.add_parser("profiles", help="inspect supported stack profiles")
@@ -395,6 +405,142 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--max-bytes", type=int, default=files_mod.DEFAULT_READ_BYTES)
     r.add_argument("--max-depth", type=int, default=files_mod.MAX_DEPTH)
     r.add_argument("--json", action="store_true")
+
+    r = rsub.add_parser(
+        "auto",
+        help="one pass from an IP: probe, discover, plan, report; then optionally defend",
+    )
+    r.add_argument("host")
+    connection_options(r)
+    r.add_argument(
+        "--apply",
+        dest="apply_mutations",
+        action="store_true",
+        help="apply the first matching tested-auto plan (needs --yes)",
+    )
+    r.add_argument(
+        "--approve-review",
+        action="store_true",
+        help="also allow review-only actions in that plan",
+    )
+    r.add_argument(
+        "--honeypot-port",
+        type=int,
+        default=0,
+        help="start an HTTP honeypot on this unused port (needs --yes)",
+    )
+    r.add_argument(
+        "--honeypot-mode",
+        choices=["http", "banner"],
+        default="http",
+        help="honeypot listener type (banner fakes an ssh/smtp/ftp greeting)",
+    )
+    r.add_argument("--honeypot-banner", default="", help="banner text or preset name")
+    r.add_argument("--yes", action="store_true", help="required for any mutation")
+    r.add_argument("--json", action="store_true")
+
+    r = rsub.add_parser(
+        "honeypot",
+        help="run decoy listeners on the host to distract attackers",
+    )
+    r.add_argument("host")
+    connection_options(r)
+    r.add_argument("honeypot_action", choices=list(remote_mod.HONEYPOT_ACTIONS))
+    r.add_argument(
+        "--honeypot-port",
+        type=int,
+        help="unused target port for the listener (--port is the ssh port)",
+    )
+    r.add_argument("--mode", choices=["http", "banner"], default="http")
+    r.add_argument("--bind", default="0.0.0.0")
+    r.add_argument("--banner", default="", help="banner text or preset name")
+    r.add_argument("--lines", type=int, default=50)
+    r.add_argument("--all", dest="all_listeners", action="store_true")
+    r.add_argument("--yes", action="store_true", help="required to start or stop")
+    r.add_argument("--json", action="store_true")
+
+    r = rsub.add_parser(
+        "lockdown",
+        help="pull a review-only firewall + sshd lockdown plan for the host",
+    )
+    r.add_argument("host")
+    connection_options(r)
+    r.add_argument(
+        "--operator-cidr",
+        default="",
+        help="your own address as the target sees it (default: read from the ssh session)",
+    )
+    r.add_argument(
+        "--allow-cidr",
+        action="append",
+        default=[],
+        help="team/checker range to keep reachable (repeatable)",
+    )
+    r.add_argument(
+        "--allow-port",
+        action="append",
+        type=int,
+        default=[],
+        help="extra TCP port to keep reachable (repeatable)",
+    )
+    r.add_argument("--allow-udp-ports", default="", help="comma-separated UDP ports to keep")
+    r.add_argument("--log-drops", action="store_true", help="log dropped packets (rate limited)")
+    r.add_argument("--no-firewall", action="store_true")
+    r.add_argument("--no-ssh", action="store_true")
+    r.add_argument("--sshd-port", type=int, default=22)
+    r.add_argument("--verbose", action="store_true", help="show full diffs")
+    r.add_argument("--json", action="store_true")
+
+    # honeypot (local lifecycle; the remote wrapper drives this over ssh)
+    p = sub.add_parser("honeypot", help="honeypot listeners on this host or a target")
+    honeypot_sub = p.add_subparsers(dest="honeypot_command")
+    h = honeypot_sub.add_parser("start", help="start one listener on an unused port")
+    h.add_argument("--port", type=int, required=True)
+    h.add_argument("--mode", choices=["http", "banner"], default="http")
+    h.add_argument("--bind", default="0.0.0.0")
+    h.add_argument("--banner", default="", help="custom text or a preset name")
+    h.add_argument("--path", action="append", default=[], help="HTTP lure path (repeatable)")
+    h.add_argument("--allow-privileged", action="store_true")
+    h.add_argument("--json", action="store_true")
+    h = honeypot_sub.add_parser("status")
+    h.add_argument("--json", action="store_true")
+    h = honeypot_sub.add_parser("logs", help="bounded tail of the listener logs")
+    h.add_argument("--lines", type=int, default=50)
+    h.add_argument("--port", type=int)
+    h.add_argument("--json", action="store_true")
+    h = honeypot_sub.add_parser("stop")
+    h.add_argument("--port", type=int)
+    h.add_argument("--all", dest="all_listeners", action="store_true")
+    h.add_argument("--json", action="store_true")
+
+    # lockdown (local planning; `remote lockdown` drives this over ssh)
+    p = sub.add_parser(
+        "lockdown",
+        help="review-only firewall + sshd plan for this host (run it on the target)",
+    )
+    lockdown_sub = p.add_subparsers(dest="lockdown_command")
+    lock = lockdown_sub.add_parser("plan", help="build the lockdown plan")
+    lock.add_argument("--operator-cidr", required=True,
+                      help="your own address; it is always added to the allowlist")
+    lock.add_argument("--allow-cidr", action="append", default=[])
+    lock.add_argument("--allow-ports", default="", help="comma-separated TCP ports to keep")
+    lock.add_argument("--allow-udp-ports", default="")
+    lock.add_argument("--no-firewall", action="store_true")
+    lock.add_argument("--no-ssh", action="store_true")
+    lock.add_argument("--log-drops", action="store_true")
+    lock.add_argument("--sshd-path", default="/etc/ssh/sshd_config")
+    lock.add_argument("--authorized-keys", default="")
+    lock.add_argument("--service-unit", default="ssh")
+    lock.add_argument("--sshd-port", type=int, default=22)
+    lock.add_argument("--nft-path", default="/etc/ctfctl-lockdown.nft")
+    lock.add_argument("--table", default="ctfctl_lockdown")
+    lock.add_argument("--note", default="")
+    lock.add_argument("--inventory", help="inventory JSON to plan against (default: discover now)")
+    lock.add_argument("--no-save", action="store_true")
+    lock.add_argument("--verbose", action="store_true")
+    lock.add_argument("--allow-fixture", action="store_true", default=False,
+                       help="allow fixture-local authorization (drills only)")
+    lock.add_argument("--json", action="store_true")
 
     return parser
 
@@ -720,12 +866,15 @@ def cmd_decoy(args: argparse.Namespace) -> int:
             )
         return util.EXIT_OK
     if command == "start":
-        state = decoy_mod.start(util.repo_root(), port=args.port, bind=args.bind)
+        state = decoy_mod.start(util.repo_root(), port=args.port, bind=args.bind,
+                                mode=getattr(args, "mode", "http"),
+                                banner=getattr(args, "banner", ""))
         if args.json:
             util.emit_json(state)
         else:
             print(
                 f"decoy started pid={state['pid']} on {state['bind']}:{state['port']}"
+                f" mode={state.get('mode', 'http')}"
             )
             print(f"events -> {state['log_path']}")
         return util.EXIT_OK
@@ -744,6 +893,86 @@ def cmd_decoy(args: argparse.Namespace) -> int:
         util.emit_json(state)
     else:
         print(decoy_mod.summarize(state))
+    return util.EXIT_OK
+
+
+def cmd_honeypot(args: argparse.Namespace) -> int:
+    command = args.honeypot_command or "status"
+    root = util.repo_root()
+    if command == "start":
+        entry = honeypot_mod.start(
+            root, port=args.port, mode=args.mode, bind=args.bind, banner=args.banner,
+            paths=list(args.path) or None, allow_privileged=args.allow_privileged,
+        )
+        if args.json:
+            util.emit_json(entry)
+        else:
+            print(f"honeypot listening on {entry['bind']}:{entry['port']} "
+                  f"mode={entry['mode']} pid={entry['pid']}")
+            print(f"events -> {entry['log_path']}  (every event carries decoy=true)")
+            print("It must never sit on a port a scored service or the checker uses.")
+        return util.EXIT_OK
+    if command == "logs":
+        payload = honeypot_mod.logs(root, lines=args.lines, port=args.port)
+        if args.json:
+            util.emit_json(payload)
+        else:
+            print(honeypot_mod.logs_text(payload))
+        return util.EXIT_OK
+    if command == "stop":
+        if not args.port and not args.all_listeners:
+            raise util.UsageError("honeypot stop needs --port <PORT> or --all")
+        payload = honeypot_mod.stop(root, port=args.port, all_listeners=args.all_listeners)
+        if args.json:
+            util.emit_json(payload)
+        else:
+            stopped = payload.get("stopped") or []
+            if not stopped:
+                print("no honeypot listener matched that selection")
+            for entry in stopped:
+                print(f"stopped port {entry.get('port')} "
+                      f"(process gone: {not entry.get('alive_after')})")
+        return util.EXIT_OK
+    payload = honeypot_mod.status(root)
+    if args.json:
+        util.emit_json(payload)
+    else:
+        print(honeypot_mod.summarize(payload))
+    return util.EXIT_OK
+
+
+def cmd_lockdown(args: argparse.Namespace) -> int:
+    command = args.lockdown_command or "plan"
+    if command != "plan":
+        raise util.UsageError(f"unknown lockdown subcommand {command!r}")
+    inventory = _load_inventory(args)
+    spec = plan_mod.LockdownSpec(
+        operator_cidr=args.operator_cidr,
+        allow_cidrs=list(args.allow_cidr),
+        allow_tcp_ports=[int(p) for p in str(args.allow_ports).replace(";", ",").split(",")
+                         if p.strip()],
+        allow_udp_ports=[int(p) for p in str(args.allow_udp_ports).replace(";", ",").split(",")
+                         if p.strip()],
+        include_firewall=not args.no_firewall,
+        include_ssh=not args.no_ssh,
+        log_drops=args.log_drops,
+        nft_path=args.nft_path,
+        table=args.table,
+        sshd_path=args.sshd_path,
+        authorized_keys_path=args.authorized_keys or "/root/.ssh/authorized_keys",
+        service_unit=args.service_unit,
+        sshd_port=args.sshd_port,
+        note=args.note,
+    )
+    plan = plan_mod.build_lockdown_plan(
+        spec, inventory, allow_fixture=args.allow_fixture
+    )
+    if not args.no_save and plan.detection.get("matched"):
+        plan.save()
+    if args.json:
+        util.emit_json({"plans": [plan.as_dict()]})
+    else:
+        print(plan_mod.render(plan, verbose=args.verbose))
     return util.EXIT_OK
 
 
@@ -1041,6 +1270,106 @@ def cmd_remote(args: argparse.Namespace) -> int:
             max_depth=args.max_depth,
             as_json=args.json,
         )
+    if command == "honeypot":
+        if args.honeypot_action == "collect":
+            payload = remote_mod.honeypot_collect(conn)
+            if args.json:
+                util.emit_json(payload)
+            else:
+                if not payload.get("collected"):
+                    print(f"nothing collected from {conn.target} "
+                          f"({payload.get('error') or 'no honeypot logs'})")
+                for item in payload.get("collected", []):
+                    print(f"port {item.get('port'):>5}  {item.get('bytes', 0):>8} bytes  "
+                          f"-> {item.get('saved_to') or item.get('error')}")
+            return util.EXIT_OK if payload.get("ok") else util.EXIT_NEGATIVE
+        code, payload = remote_mod.honeypot(
+            conn, args.honeypot_action, port=args.honeypot_port, mode=args.mode,
+            bind=args.bind,
+            banner=args.banner, lines=args.lines, all_listeners=args.all_listeners,
+            yes=args.yes,
+        )
+        if args.json:
+            util.emit_json(payload)
+        elif args.honeypot_action == "status":
+            print(remote_mod.render_honeypot_status(payload))
+        elif args.honeypot_action == "logs":
+            print(util.printable(remote_mod.render_honeypot_logs(payload), 8000))
+        elif args.honeypot_action == "start":
+            if payload.get("port"):
+                print(f"honeypot on {conn.target}: port {payload['port']} "
+                      f"mode={payload.get('mode')} log={payload.get('log_path')}")
+                print("Collect the events with: ctfctl remote honeypot "
+                      f"{conn.target} collect")
+            else:
+                print(f"honeypot did not start: {util.printable(str(payload), 400)}")
+        else:
+            print(f"stopped: {util.printable(str(payload.get('stopped') or payload), 400)}")
+        return code
+    if command == "lockdown":
+        payload = remote_mod.lockdown(
+            conn,
+            operator_cidr=args.operator_cidr,
+            allow_cidrs=list(args.allow_cidr),
+            allow_ports=list(args.allow_port),
+            allow_udp_ports=[int(p) for p in str(args.allow_udp_ports).replace(";", ",")
+                             .split(",") if p.strip()],
+            include_firewall=not args.no_firewall,
+            include_ssh=not args.no_ssh,
+            log_drops=args.log_drops,
+            sshd_port=args.sshd_port,
+        )
+        matched = [
+            entry for entry in (payload.get("plans") or [])
+            if (entry.get("detection") or {}).get("matched")
+        ]
+        if args.json:
+            util.emit_json(payload)
+        else:
+            meta = payload.get("remote") or {}
+            print(
+                f"host {conn.target}: operator={meta.get('operator_cidr')} "
+                f"ports_kept={meta.get('allowed_ports')} "
+                f"authorization_mirrored={meta.get('authorization_mirrored')} "
+                f"policy_acknowledged={meta.get('policy_acknowledged')}"
+            )
+            if not meta.get("authorization_mirrored"):
+                print(
+                    "\nThe local policy is not acknowledged, so the plan would be refused by "
+                    "the apply step on the target. This is a review copy only."
+                )
+            for entry in matched:
+                print()
+                print(remote_mod.render_plan(entry, verbose=args.verbose))
+                plan_id = entry.get("plan_id", "latest")
+                prefix = _remote_command_prefix(args, "apply")
+                print(
+                    f"\nnext: read the diff above, confirm you have a console, then\n"
+                    f"      {prefix} {conn.target} --plan {plan_id} --approve-review --yes"
+                )
+        return util.EXIT_OK if matched else util.EXIT_NEGATIVE
+    if command == "auto":
+        payload = remote_mod.auto(
+            conn,
+            apply_mutations=args.apply_mutations,
+            approve_review=args.approve_review,
+            honeypot_port=args.honeypot_port,
+            honeypot_mode=args.honeypot_mode,
+            honeypot_banner=args.honeypot_banner,
+            yes=args.yes,
+        )
+        if args.json:
+            util.emit_json(payload)
+        else:
+            print(remote_mod.render_auto_report(payload))
+            print(f"\nsaved: {payload['report_json']}")
+            print(f"       {payload['report_markdown']}")
+        failed = [
+            key for key, code_key in (("apply", "apply_exit_code"),
+                                      ("honeypot", "honeypot_exit_code"))
+            if key in (payload.get("steps") or {}) and payload.get(code_key) not in (None, 0)
+        ]
+        return util.EXIT_NEGATIVE if failed or payload.get("gaps") else util.EXIT_OK
     raise util.UsageError(f"unknown remote subcommand {command!r}")
 
 
@@ -1107,6 +1436,34 @@ def cmd_kb(args: argparse.Namespace) -> int:
                 util.emit_json({"error": str(exc), "hint": exc.hint, "hits": []})
             return util.EXIT_NEGATIVE
         return _emit_hits(hits, args.json)
+    if command == "cheat":
+        try:
+            hits = kbindex.search(
+                args.topic, mode="auto", tag="cheatsheet", limit=args.limit
+            ) if args.topic else kbindex.by_tag("cheatsheet", limit=args.limit)
+        except util.CtfError as exc:
+            if args.json:
+                util.emit_json({"error": str(exc), "hint": exc.hint, "hits": []})
+            else:
+                util.eprint(f"ERROR query: {exc}")
+            return util.EXIT_NEGATIVE
+        if args.json:
+            util.emit_json({"hits": [h.as_dict() for h in hits]})
+        else:
+            if not hits:
+                print(
+                    "No cheatsheet cards are indexed. Build the index first "
+                    "(`ctfctl kb index`) or drop Markdown into kb/cheatsheets/."
+                )
+            for hit in hits:
+                print(f"{hit.title}")
+                print(f"  id   {hit.stable_id}")
+                print(f"  path {hit.path}")
+                if hit.snippet:
+                    print(f"  {util.printable(hit.snippet, 200)}")
+            if hits:
+                print("\nfull text: ctfctl kb show <id>   everything: ctfctl kb search <terms>")
+        return util.EXIT_OK if hits else util.EXIT_NEGATIVE
     if command == "literal":
         hits = kbindex.literal(
             args.pattern,
@@ -1419,6 +1776,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         "recover": cmd_recover,
         "watch": cmd_watch,
         "decoy": cmd_decoy,
+        "honeypot": cmd_honeypot,
+        "lockdown": cmd_lockdown,
         "kb": cmd_kb,
         "profiles": cmd_profiles,
         "prep-online": cmd_prep_online,

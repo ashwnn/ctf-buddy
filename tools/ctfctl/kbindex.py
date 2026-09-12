@@ -658,6 +658,43 @@ def search(
         conn.close()
 
 
+def by_tag(tag: str, *, limit: int = 20, kind: Optional[str] = None,
+           root: Optional[str] = None) -> List[Hit]:
+    """List every indexed document carrying a tag, best-ranked first by title.
+
+    Used by `ctfctl kb cheat` to enumerate quick-reference cards without a query.
+    """
+    limit = max(1, min(int(limit), MAX_LIMIT))
+    root = root or util.repo_root()
+    path = index_path(root)
+    if not os.path.exists(path):
+        raise util.CtfError(
+            "no search index yet",
+            hint="run: ctfctl kb index",
+        )
+    conn = _connect(path)
+    try:
+        sql = (
+            "SELECT d.stable_id, d.kind, d.path, d.title"
+            " FROM docs d JOIN doc_tags t ON t.doc_rowid = d.rowid"
+            " WHERE t.tag = ?"
+        )
+        params: List[Any] = [tag.lower()]
+        if kind:
+            sql += " AND d.kind = ?"
+            params.append(kind)
+        sql += " ORDER BY d.title ASC, d.stable_id ASC LIMIT ?"
+        params.append(limit)
+        rows = conn.execute(sql, params).fetchall()
+        return [
+            Hit(stable_id=row["stable_id"], kind=row["kind"], path=row["path"],
+                title=row["title"], score=0.0, snippet="")
+            for row in rows
+        ]
+    finally:
+        conn.close()
+
+
 def _clean_snippet(text: str) -> str:
     text = re.sub(r"\s+", " ", text)
     return util.printable(text.strip(), 400)
