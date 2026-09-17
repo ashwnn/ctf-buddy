@@ -18,8 +18,11 @@ names each category that applies:
     ``depth-skipped``: a walk entry that was not scanned, a symlink or reparse
     point that was never followed, a non-regular entry, or a subtree beyond
     the depth limit;
-  * ``members-skipped``: a member refused by name validation, a duplicate, an
-    encrypted member or one over the ratio guard;
+  * ``members-skipped``: a member refused without being read: a directory
+    entry, an archived link or special entry, a member refused by name
+    validation, a duplicate, an encrypted member or one over the ratio guard
+    (directory members are broken out as
+    ``counts.directory_members_skipped``);
   * ``members-unparsed``: a member cut short, refused for its declared size or
     otherwise not fully read.
 
@@ -335,6 +338,7 @@ class _ScanState:
         self.collisions = 0
         self.invalid_members = 0
         self.encrypted_skipped = 0
+        self.directory_members_skipped = 0
         self.members_seen = 0
         self.members_parsed = 0
         self.members_skipped = 0
@@ -1267,6 +1271,10 @@ def _inspect_zip(state: _ScanState, label: str, source: Any, depth: int) -> None
         if len(infos) > state.max_members:
             dropped = len(infos) - state.max_members
             state.hit("max-members")
+            # Dropped entries are members the archive still declared: count
+            # them as seen and unparsed so seen == parsed + skipped + unparsed
+            # holds even when the list was truncated before the loop.
+            state.members_seen += dropped
             state.members_unparsed += dropped
             infos = infos[: state.max_members]
         infos = sorted(infos, key=lambda info: info.filename)
@@ -1275,11 +1283,9 @@ def _inspect_zip(state: _ScanState, label: str, source: Any, depth: int) -> None
                 return
             if state.check_time():
                 return
+            # The list was truncated to ``max_members`` above, so the cap is
+            # already enforced and every visited member is within budget.
             state.members_seen += 1
-            if state.members_seen > state.max_members:
-                state.members_unparsed += 1
-                state.stop("max-members")
-                return
             name = info.filename
             mode = (info.external_attr >> 16) & 0xFFFF
             # Some writers store permission bits without a file type; type 0
@@ -1288,9 +1294,11 @@ def _inspect_zip(state: _ScanState, label: str, source: Any, depth: int) -> None
             is_dir = name.endswith("/") or file_type == stat.S_IFDIR
             if file_type == stat.S_IFLNK:
                 state.links_skipped += 1
+                state.members_skipped += 1
                 continue
             if file_type not in (0, stat.S_IFREG, stat.S_IFDIR):
                 state.special_skipped += 1
+                state.members_skipped += 1
                 continue
             normalized = validate_member_name(name, is_dir=is_dir)
             if normalized is None:
@@ -1301,6 +1309,8 @@ def _inspect_zip(state: _ScanState, label: str, source: Any, depth: int) -> None
             if not state.claim_member(label, normalized):
                 continue
             if is_dir:
+                state.members_skipped += 1
+                state.directory_members_skipped += 1
                 continue
             if info.flag_bits & 0x1:
                 state.encrypted_skipped += 1
@@ -1319,7 +1329,7 @@ def _inspect_zip(state: _ScanState, label: str, source: Any, depth: int) -> None
                         state, label, normalized, member, info.file_size, depth, ratio
                     )
             except Exception as exc:  # corrupt member stream: record and go on
-                state.members_skipped += 1
+                state.members_unparsed += 1
                 state.hit("member-unparsed")
                 state.errors.append(
                     f"{label}!/{normalized}: {_safe_note(str(exc), 160)}"
@@ -1379,13 +1389,18 @@ def _inspect_tar(state: _ScanState, label: str, source: Any, depth: int) -> None
                         state.invalid_members += 1
                         state.members_skipped += 1
                         continue
-                    state.claim_member(label, _sanitize_member_name(normalized))
+                    if not state.claim_member(label, _sanitize_member_name(normalized)):
+                        continue
+                    state.members_skipped += 1
+                    state.directory_members_skipped += 1
                     continue
                 if member.islnk() or member.issym():
                     state.links_skipped += 1
+                    state.members_skipped += 1
                     continue
                 if not member.isreg():
                     state.special_skipped += 1
+                    state.members_skipped += 1
                     continue
                 normalized = validate_member_name(name, is_dir=False)
                 if normalized is None:
@@ -1413,14 +1428,14 @@ def _inspect_tar(state: _ScanState, label: str, source: Any, depth: int) -> None
                     _stop_tar_member(state, label, f"{label}!/{normalized}", exc.reason)
                     return
                 except Exception as exc:  # untrusted archive: record, never crash
-                    state.members_skipped += 1
+                    state.members_unparsed += 1
                     state.hit("member-unparsed")
                     state.errors.append(
                         f"{label}!/{normalized}: {_safe_note(str(exc), 160)}"
                     )
                     return
                 if handle is None:
-                    state.members_skipped += 1
+                    state.members_unparsed += 1
                     state.hit("member-unparsed")
                     return
                 try:
@@ -1432,7 +1447,7 @@ def _inspect_tar(state: _ScanState, label: str, source: Any, depth: int) -> None
                     _stop_tar_member(state, label, f"{label}!/{normalized}", exc.reason)
                     return
                 except Exception as exc:  # corrupt member stream: record, never crash
-                    state.members_skipped += 1
+                    state.members_unparsed += 1
                     state.hit("member-unparsed")
                     state.errors.append(
                         f"{label}!/{normalized}: {_safe_note(str(exc), 160)}"
@@ -1667,6 +1682,7 @@ def _counts(state: _ScanState) -> Dict[str, int]:
         "collisions": state.collisions,
         "invalid_members": state.invalid_members,
         "encrypted_skipped": state.encrypted_skipped,
+        "directory_members_skipped": state.directory_members_skipped,
         "bytes_read": state.bytes_read,
         "bytes_expanded": state.bytes_expanded,
         "metadata_bytes": state.metadata_bytes,
@@ -1730,10 +1746,12 @@ def render_scan(payload: Dict[str, Any]) -> str:
             )
         )
         lines.append(
-            "  collisions={collisions} invalid_names={invalid} encrypted={encrypted}".format(
+            "  collisions={collisions} invalid_names={invalid} encrypted={encrypted} "
+            "directory_members={directories}".format(
                 collisions=counts.get("collisions", 0),
                 invalid=counts.get("invalid_members", 0),
                 encrypted=counts.get("encrypted_skipped", 0),
+                directories=counts.get("directory_members_skipped", 0),
             )
         )
     lines.append(

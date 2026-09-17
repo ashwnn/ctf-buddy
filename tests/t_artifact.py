@@ -207,6 +207,34 @@ def _gz_tar_bytes(members: List[Tuple[str, bytes]]) -> bytes:
     return buffer.getvalue()
 
 
+def _dir_tar_bytes() -> bytes:
+    """A tar with an explicit directory entry and one regular member."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        directory = tarfile.TarInfo("empty/")
+        directory.type = tarfile.DIRTYPE
+        archive.addfile(directory)
+        data = b"FLAG{dir_tar}"
+        regular = tarfile.TarInfo("file.txt")
+        regular.size = len(data)
+        archive.addfile(regular, io.BytesIO(data))
+    return buffer.getvalue()
+
+
+def _disposition_zip_bytes() -> bytes:
+    """A zip with a symlink-mode entry, a fifo entry and one regular member."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("real.txt", b"FLAG{disp_zip}")
+        symlink = zipfile.ZipInfo("sym.txt")
+        symlink.external_attr = (stat.S_IFLNK | 0o777) << 16
+        archive.writestr(symlink, b"../../outside-secret")
+        fifo = zipfile.ZipInfo("pipe.txt")
+        fifo.external_attr = (stat.S_IFIFO | 0o644) << 16
+        archive.writestr(fifo, b"special data")
+    return buffer.getvalue()
+
+
 def _patch_tar_member_size(data: bytes, block_index: int, declared: int) -> bytes:
     """Rewrite the size field and checksum of the block_index-th 512B tar header.
 
@@ -845,9 +873,14 @@ def test_zip_member_name_attacks_are_refused_and_not_read() -> None:
             "case variants collide only where the filesystem is case-insensitive",
         )
         check_eq(
+            counts["directory_members_skipped"],
+            2,
+            "both directory members must be counted as skipped directories",
+        )
+        check_eq(
             counts["members_skipped"],
-            counts["invalid_members"] + counts["collisions"],
-            "refused and colliding members must all be counted as skipped",
+            counts["invalid_members"] + counts["collisions"] + 2,
+            "refused, colliding and directory members must all be counted as skipped",
         )
         values = _values(payload)
         for flag in _INVALID_FLAGS:
@@ -1757,13 +1790,25 @@ def test_zip_eocd_count_below_real_entries_counts_dropped_members() -> None:
             {"hit": True, "reasons": ["max-members"]},
             "the member cap must be the reported limit",
         )
+        counts = payload["counts"]
         check_eq(
-            payload["counts"]["members_unparsed"],
+            counts["members_unparsed"],
             2,
             "the dropped entries must be counted, not silently discarded",
         )
-        check_eq(payload["counts"]["members_seen"], 2, "only the kept entries walked")
-        check_eq(payload["counts"]["members_parsed"], 2, "the kept entries were read")
+        check_eq(
+            counts["members_seen"],
+            4,
+            "the dropped entries must also be counted as seen: 2 kept + 2 dropped",
+        )
+        check_eq(counts["members_parsed"], 2, "the kept entries were read")
+        check_eq(
+            counts["members_seen"],
+            counts["members_parsed"]
+            + counts["members_skipped"]
+            + counts["members_unparsed"],
+            "seen members must equal parsed + skipped + unparsed",
+        )
         check_eq(
             sorted(_member_names(payload)),
             ["m0.txt", "m1.txt"],
@@ -2059,10 +2104,10 @@ def test_zip_eocd_decoy_in_comment_is_refused_before_opening() -> None:
 def _check_member_accounting(payload: Dict[str, Any], label: str) -> None:
     """Every seen member must land in exactly one disposition counter.
 
-    Skipped members are the ones refused unread (invalid name, duplicate,
-    encrypted, ratio guard); unparsed members are cut short or refused for their
-    declared size. Directory, link and special members are dispositions of
-    their own, exercised by other tests and outside this identity.
+    Skipped members are refused unread: a directory, link or special entry, an
+    invalid name, a duplicate, an encrypted member or one over the ratio guard;
+    unparsed members are cut short or refused for their declared size. The
+    identity therefore holds for every archive shape, not just file members.
     """
     counts = payload["counts"]
     check_eq(
@@ -2126,7 +2171,9 @@ def test_tar_member_seen_then_cut_mid_read_is_counted_unparsed() -> None:
         )
 
         # General invariant: the same identity must hold for the cheap,
-        # regular-member archive shapes this suite already builds elsewhere.
+        # regular-member archive shapes this suite already builds elsewhere,
+        # and for directory, link and special members, which are now counted
+        # as skipped members rather than sitting outside the identity.
         regulars = {
             "normal.zip": _zip_bytes([("a.txt", b"FLAG{a}"), ("b.txt", b"B")]),
             "collision.zip": _zip_bytes([("dup.txt", b"1"), ("dup.txt", b"2")]),
@@ -2138,6 +2185,9 @@ def test_tar_member_seen_then_cut_mid_read_is_counted_unparsed() -> None:
             ),
             "ratio.zip": _zip_bytes([("zeros.bin", b"\x00" * artifact_mod.MIB)]),
             "normal.tar": _tar_bytes([("a.txt", b"AAA"), ("b.txt", b"B")]),
+            "dirs.zip": _zip_bytes([("empty/", b""), ("file.txt", b"FLAG{dir_zip}")]),
+            "dirs.tar": _dir_tar_bytes(),
+            "dispositions.zip": _disposition_zip_bytes(),
         }
         for name, data in regulars.items():
             fixture = os.path.join(root, name)
