@@ -1276,6 +1276,9 @@ def cmd_remote(args: argparse.Namespace) -> int:
             util.emit_json(payload)
         else:
             transactions = payload.get("transactions") or payload.get("results") or []
+            if payload.get("tx_id"):
+                # A confirmed rollback returns a single-transaction payload, not a list.
+                transactions = [payload]
             if not transactions and "error" in payload:
                 print(f"rollback failed: {payload['error']}")
             for item in transactions:
@@ -1283,6 +1286,10 @@ def cmd_remote(args: argparse.Namespace) -> int:
                     f"{item.get('tx_id', '?')}  phase={item.get('phase', '?')}  "
                     f"files={len(item.get('files') or [])}"
                 )
+                for path in item.get("restored") or []:
+                    print(f"  restored {path}")
+                for error in item.get("errors") or []:
+                    print(f"  ! {util.printable(str(error), 160)}")
             if not transactions and "error" not in payload:
                 print("no remote transactions recorded")
             if payload.get("rolled_back"):
@@ -1293,14 +1300,17 @@ def cmd_remote(args: argparse.Namespace) -> int:
         if args.json:
             util.emit_json(payload)
         else:
-            findings = payload.get("findings") or payload.get("transactions") or []
-            if not findings:
+            interrupted = payload.get("interrupted") or []
+            if not interrupted:
                 print("no interrupted remote transactions")
-            for item in findings:
-                print(
-                    f"{item.get('tx_id', '?')}  phase={item.get('phase', '?')}  "
-                    f"next: {item.get('requires', 'review')}"
-                )
+            for finding in interrupted:
+                print(f"{finding.get('tx_id', '?')}  phase={finding.get('phase', '?')}")
+                for item in finding.get("files") or []:
+                    print(
+                        f"  {item.get('state', '?')}: {item.get('path', '?')} -> "
+                        f"{item.get('action', '?')}"
+                    )
+                print(f"  next: {finding.get('requires', 'review')}")
         return code
     if command == "run":
         return remote_mod.run_read_only(conn, list(args.args))
