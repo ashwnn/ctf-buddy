@@ -4,6 +4,7 @@ captures/
 backups/
 loot/
 runtime/
+work/
 
 # Generated search index (rebuildable: `ctfctl kb index --rebuild`)
 index/

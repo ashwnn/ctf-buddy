@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 from . import (
     __version__,
     apply as apply_mod,
+    challenge as challenge_mod,
     decoy as decoy_mod,
     discover as discover_mod,
 )
@@ -313,6 +314,16 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument("--limit", type=int, default=files_mod.DEFAULT_LIMIT)
     f.add_argument("--max-depth", type=int, default=files_mod.MAX_DEPTH)
     f.add_argument("--json", action="store_true")
+    p.add_argument("--json", action="store_true")
+
+    # challenge workspaces
+    p = sub.add_parser("challenge", help="isolated per-challenge workspaces")
+    ch_sub = p.add_subparsers(dest="challenge_command")
+    c = ch_sub.add_parser(
+        "init", help="create the fixed workspace layout for one challenge id"
+    )
+    c.add_argument("challenge_id", help="lowercase id such as sample-web")
+    c.add_argument("--json", action="store_true")
     p.add_argument("--json", action="store_true")
 
     # remote
@@ -1105,6 +1116,32 @@ def cmd_files(args: argparse.Namespace) -> int:
     raise util.UsageError(f"unknown files action {command!r}")
 
 
+def cmd_challenge(args: argparse.Namespace) -> int:
+    command = args.challenge_command
+    if not command:
+        raise util.UsageError(
+            "challenge needs a subcommand",
+            hint="try: ctfctl challenge init <challenge-id>",
+        )
+    if command == "init":
+        try:
+            payload = challenge_mod.init_workspace(args.challenge_id)
+        except challenge_mod.ChallengeError as exc:
+            if args.json:
+                util.emit_json({**exc.payload, "error": str(exc), "hint": exc.hint})
+                return exc.exit_code
+            raise
+        if args.json:
+            util.emit_json(payload)
+        else:
+            print(f"created workspace work/{payload['id']}")
+            for name in ("prompt", "notes", "solve", "flags", "files", "evidence"):
+                print(f"  {name:<9} {payload['paths'][name]}")
+            print(f"next: paste the challenge text into {payload['paths']['prompt']}")
+        return util.EXIT_OK
+    raise util.UsageError(f"unknown challenge subcommand {command!r}")
+
+
 def _absorb_run_connection_options(args: argparse.Namespace) -> List[str]:
     """Move connection flags that argparse left in REMAINDER back onto args.
 
@@ -1846,6 +1883,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "prep-online": cmd_prep_online,
         "targets": cmd_targets,
         "files": cmd_files,
+        "challenge": cmd_challenge,
         "remote": cmd_remote,
     }
     handler = handlers[args.command]

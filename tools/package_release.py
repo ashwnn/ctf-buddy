@@ -28,6 +28,7 @@ import io
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tarfile
@@ -72,7 +73,13 @@ EXCLUDE_DIR_NAMES = {
     "index",
     "loot",
     "runtime",
+    "work",
 }
+
+#: EXCLUDE_DIR_NAMES after os.path.normcase: on Windows this folds case and
+#: slashes so `Work/` or `WORK/` cannot leak; on POSIX normcase is the identity
+#: function and the comparison stays case-sensitive.
+_NORMCASE_DIR_NAMES = frozenset(os.path.normcase(name) for name in EXCLUDE_DIR_NAMES)
 EXCLUDE_REL_PREFIXES = (
     "sources/raw/",
     "sources/text/private/",
@@ -107,6 +114,35 @@ class ReleaseError(Exception):
     pass
 
 
+def _is_linklike_dir(path: str) -> bool:
+    """True for a symlink, and for a Windows junction or reparse point.
+
+    os.walk does not follow symlinked directories, but on Windows it follows
+    junctions, so they are pruned explicitly before descending. Symlinks keep
+    POSIX S_ISLNK semantics via lstat. os.path.isjunction exists from Python
+    3.12; older interpreters fall back to FILE_ATTRIBUTE_REPARSE_POINT from
+    the lstat result.
+    """
+    if os.path.islink(path):
+        return True
+    if os.name != "nt":
+        return False
+    isjunction = getattr(os.path, "isjunction", None)
+    if isjunction is not None:
+        try:
+            if isjunction(path):
+                return True
+        except OSError:
+            return True
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return True
+    attributes = getattr(info, "st_file_attributes", 0)
+    reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return bool(attributes & reparse_point)
+
+
 def _iter_files(root: str = ROOT) -> Tuple[List[Tuple[str, str]], List[str]]:
     """Return (sorted (relative posix path, absolute path), skipped notes)."""
     found: List[Tuple[str, str]] = []
@@ -119,7 +155,12 @@ def _iter_files(root: str = ROOT) -> Tuple[List[Tuple[str, str]], List[str]]:
         if not os.path.isdir(path):
             continue
         for dirpath, dirnames, filenames in os.walk(path):
-            dirnames[:] = sorted(d for d in dirnames if d not in EXCLUDE_DIR_NAMES)
+            dirnames[:] = sorted(
+                name
+                for name in dirnames
+                if os.path.normcase(name) not in _NORMCASE_DIR_NAMES
+                and not _is_linklike_dir(os.path.join(dirpath, name))
+            )
             for filename in sorted(filenames):
                 absolute = os.path.join(dirpath, filename)
                 relative = os.path.relpath(absolute, root).replace(os.sep, "/")
@@ -284,8 +325,9 @@ def build_release_notes(
         "",
         "## Excluded on purpose",
         "",
-        "Runtime state, captures, backups, generated search index, local source",
-        "snapshots, secrets and binaries are never packaged. Skipped entries:",
+        "Runtime state, per-challenge workspaces, captures, backups, generated",
+        "search index, local source snapshots, secrets and binaries are never",
+        "packaged. Skipped entries:",
         "",
     ]
     if skipped:
@@ -315,7 +357,7 @@ def build_release(out_dir: str, *, root: str = ROOT) -> Dict[str, Any]:
     forbidden = [
         relative
         for relative, _ in files
-        if relative.startswith(("state/", "captures/", "index/", "backups/"))
+        if relative.startswith(("state/", "captures/", "index/", "backups/", "work/"))
         or relative.startswith(EXCLUDE_REL_PREFIXES)
     ]
     if forbidden:
