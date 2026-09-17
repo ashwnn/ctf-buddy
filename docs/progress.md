@@ -12,7 +12,7 @@ locally). New modules since the 2026-09-12 record: `t_cli_plan_alias` (14),
 `t_integrate` (12), `t_kb_cli` (15), `t_watch` (9); `t_kbindex` is now 13.
 
 **CI added:** `.github/workflows/tests.yml` (ubuntu-latest + windows-latest x
-Python 3.9 + 3.x). Workflow run 35191029558 on head 68729c4 is all green:
+Python 3.9 + 3.x). Workflow run 35191029558 is all green on every job:
 ubuntu jobs 220 passed / 0 failed / 0 skipped (Docker available, both container
 modules ran); windows jobs 216 passed / 0 failed / 2 modules skipped (the
 runner's Docker was in Windows-container mode; the fixtures need Linux
@@ -25,7 +25,7 @@ exit 0, version 0.2.0, 219 files archived; `dist/ctf-buddy-0.2.0.tar.gz` is
 `CHECKSUMS.sha256` 259 B, `MANIFEST.sha256` 23,105 B, `RELEASE-NOTES.md` 1,655
 B, `SOURCE-LICENSES.jsonl` 36,778 B. `--check` verified OK (219 files) and a
 second independent build of the same tree was byte-identical. Run at commit
-68729c4 (later commits are documentation only), on Windows / Python 3.14.7, so
+8f689e3 (later commits are documentation only), on Windows / Python 3.14.7, so
 the Docker-backed integration modules were skipped locally. This supersedes
 the 0.1.0 and 0.2.0 rehearsal figures below.
 

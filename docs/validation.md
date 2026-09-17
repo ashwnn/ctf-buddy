@@ -61,12 +61,16 @@ discover and plan. No non-loopback connection was attempted.
 
 `.github/workflows/tests.yml` runs `python tests/run_tests.py` on a matrix of
 ubuntu-latest and windows-latest with Python 3.9 and 3.x. Workflow run
-**35191029558** on head `68729c4` is all green on every job:
+**35191029558** is all green on every job:
 
 | Runner | Result | Notes |
 |---|---|---|
 | ubuntu-latest | 220 passed, 0 failed, 0 skipped | Docker available; both container modules ran |
 | windows-latest | 216 passed, 0 failed, 2 modules skipped | The runner's Docker was in Windows-container mode; the fixture images need Linux containers |
+
+Commit shas cited in this document predating 2026-09-17 refer to the
+pre-normalization history; the rewrite changed authorship only and every tree
+is byte-identical.
 
 These are GitHub-hosted runners and the results are our checks. They do not
 prove that an organizer checker passes or that the event environment behaves
@@ -148,7 +152,7 @@ python tools/package_release.py --rehearse --json
 python tools/package_release.py --check dist/ctf-buddy-0.2.0.tar.gz
 ```
 
-* Recorded rehearsal (2026-09-16, commit `68729c4`; commits after it contain
+* Recorded rehearsal (2026-09-16, commit `8f689e3`; commits after it contain
   only documentation changes): exit 0, version 0.2.0, 219 files archived;
   `dist/ctf-buddy-0.2.0.tar.gz` is 612,577 bytes with sha256
   `df03917b71a49aa8300331140a2ee4ab1b47b39c29829971a45604bd337bee40`, alongside
