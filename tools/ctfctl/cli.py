@@ -84,7 +84,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     # apply
     p = sub.add_parser("apply", help="apply a reviewed plan (or run a tested profile)")
-    p.add_argument("plan_id", nargs="?", default="latest")
+    p.add_argument("plan_id", nargs="?", default=None)
+    p.add_argument(
+        "--plan",
+        metavar="PLAN_ID",
+        help="plan id to apply (default: latest); alias for the positional",
+    )
     p.add_argument(
         "--yes", action="store_true", help="required for non-interactive apply"
     )
@@ -357,7 +362,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     r = rsub.add_parser("apply", help="apply a reviewed plan on the host")
     r.add_argument("host")
-    r.add_argument("plan_id", nargs="?", default="latest")
+    r.add_argument("plan_id", nargs="?", default=None)
+    r.add_argument(
+        "--plan",
+        metavar="PLAN_ID",
+        help="plan id to apply (default: latest); alias for the positional",
+    )
     connection_options(r)
     r.add_argument("--yes", action="store_true", help="required for a real apply")
     r.add_argument("--dry-run", action="store_true")
@@ -367,7 +377,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     r = rsub.add_parser("verify", help="run the plan's health checks on the host")
     r.add_argument("host")
-    r.add_argument("plan_id", nargs="?", default="latest")
+    r.add_argument("plan_id", nargs="?", default=None)
+    r.add_argument(
+        "--plan",
+        metavar="PLAN_ID",
+        help="plan id to verify (default: latest); alias for the positional",
+    )
     connection_options(r)
     r.add_argument("--no-functional", action="store_true")
     r.add_argument("--json", action="store_true")
@@ -660,8 +675,28 @@ def cmd_plan(args: argparse.Namespace) -> int:
     return util.EXIT_OK if matched else util.EXIT_NEGATIVE
 
 
+def _resolve_plan_id(args: argparse.Namespace) -> str:
+    """Merge the positional plan id with its --plan alias.
+
+    Either spelling is accepted; passing both with different values is a usage
+    error rather than silently picking one. Neither keeps the "latest" default.
+    """
+    plan_id = args.plan_id
+    alias = args.plan
+    if plan_id is not None and alias is not None and plan_id != alias:
+        raise util.UsageError(
+            f"conflicting plan ids: {plan_id!r} positional and {alias!r} for --plan",
+            hint="pass the plan id once, positionally or with --plan",
+        )
+    if plan_id is not None:
+        return plan_id
+    if alias is not None:
+        return alias
+    return "latest"
+
+
 def cmd_apply(args: argparse.Namespace) -> int:
-    plan = plan_mod.load_plan(args.plan_id)
+    plan = plan_mod.load_plan(_resolve_plan_id(args))
     if not plan.automatic_actions() and not args.approve_review:
         raise util.CtfError(
             "the plan has no auto-eligible actions",
@@ -1203,7 +1238,7 @@ def cmd_remote(args: argparse.Namespace) -> int:
     if command == "apply":
         code, payload = remote_mod.apply(
             conn,
-            args.plan_id,
+            _resolve_plan_id(args),
             yes=args.yes,
             dry_run=args.dry_run,
             approve_review=args.approve_review,
@@ -1216,7 +1251,7 @@ def cmd_remote(args: argparse.Namespace) -> int:
         return code
     if command == "verify":
         code, payload = remote_mod.verify(
-            conn, args.plan_id, no_functional=args.no_functional
+            conn, _resolve_plan_id(args), no_functional=args.no_functional
         )
         if args.json:
             util.emit_json(payload)
