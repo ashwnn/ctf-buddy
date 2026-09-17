@@ -14,6 +14,7 @@ import json
 import os
 import shutil
 import tarfile
+import time
 from contextlib import redirect_stderr, redirect_stdout
 from typing import Any, Dict, List, Tuple
 
@@ -307,6 +308,48 @@ def test_toolkit_fingerprint_changes_with_content() -> None:
         check_eq(
             remote.toolkit_fingerprint(root), second, "fingerprints must be stable"
         )
+
+
+def test_build_bundle_is_deterministic_under_an_advancing_clock() -> None:
+    # `tarfile` mode `w:gz` used to stamp `time.time()` into the gzip header, so
+    # two builds straddling a second boundary differed. Force the clock forward
+    # on every read: a bundle that consults it cannot stay byte-identical.
+    real_time = time.time
+    ticks = [0.0]
+
+    def advancing_clock() -> float:
+        ticks[0] += 5.0
+        return ticks[0]
+
+    time.time = advancing_clock
+    try:
+        check_eq(time.time(), 5.0, "the test clock must be the patched one")
+        first = remote.build_bundle(REPO_ROOT)
+        second = remote.build_bundle(REPO_ROOT)
+        first_fingerprint = remote.toolkit_fingerprint(REPO_ROOT)
+        second_fingerprint = remote.toolkit_fingerprint(REPO_ROOT)
+    finally:
+        time.time = real_time
+    check_eq(first, second, "two builds must be byte-identical across a clock jump")
+    check_eq(
+        first_fingerprint,
+        second_fingerprint,
+        "the fingerprint must not depend on the wall clock",
+    )
+
+
+def test_build_bundle_gzip_header_has_zero_mtime() -> None:
+    bundle = remote.build_bundle(REPO_ROOT)
+    check(
+        bundle[:4] == b"\x1f\x8b\x08\x00",
+        "the gzip header must start with magic, deflate and empty flags: "
+        f"{bundle[:10]!r}",
+    )
+    check_eq(
+        bundle[4:8],
+        b"\x00\x00\x00\x00",
+        "the gzip MTIME must be zero, not the wall clock",
+    )
 
 
 # --------------------------------------------------------------------------
