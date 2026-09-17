@@ -320,3 +320,35 @@ def docker_available() -> bool:
         return False
     result = util.run(["docker", "info", "--format", "{{.ServerVersion}}"], timeout=20)
     return result.ok
+
+
+def docker_skip_reason(needs: str, *, require_linux: bool = False) -> Optional[str]:
+    """Return the reason to skip a Docker module, or ``None`` when it can run.
+
+    ``needs`` names the requirement in the human-readable reason, e.g. "the
+    container integration test". A missing CLI or an unreachable daemon keeps the
+    original reason. With ``require_linux`` set, a reachable daemon running
+    Windows containers also skips (the fixture images are Linux-only, as on
+    GitHub's Windows runners); an inconclusive OS-type probe degrades to a skip
+    instead of a hard failure.
+    """
+    from ctfctl import util
+
+    missing = (f"docker is not available (daemon not running or CLI missing); "
+               f"{needs} needs it, the rest of the suite does not")
+    if not util.which("docker"):
+        return missing
+    version = util.run(["docker", "info", "--format", "{{.ServerVersion}}"], timeout=20)
+    if not version.ok:
+        return missing
+    if not require_linux:
+        return None
+    probe = util.run(["docker", "info", "--format", "{{.OSType}}"], timeout=20)
+    if not probe.ok:
+        return (f"docker is reachable but the container OS type could not be probed; "
+                f"{needs} needs linux containers")
+    os_type = probe.stdout.strip().lower()
+    if os_type != "linux":
+        return (f"docker is running {os_type or 'unknown'} containers; the fixtures "
+                "need linux containers")
+    return None

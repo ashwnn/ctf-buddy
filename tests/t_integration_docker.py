@@ -5,8 +5,9 @@ not already running, then drives the real CLI: discover -> plan -> apply -> veri
 -> rollback, asserting that the exploit stops working, the legitimate workflow
 keeps working, and rollback restores the vulnerable state.
 
-If Docker (or the fixture directory) is unavailable, the module sets SKIP with a
-reason instead of pretending to pass.
+If Docker (or the fixture directory) is unavailable, or Docker is running
+Windows containers instead of Linux ones, the module sets SKIP with a reason
+instead of pretending to pass.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ import urllib.request
 from contextlib import redirect_stderr, redirect_stdout
 from typing import Dict, List, Optional, Tuple
 
-from helpers import REPO_ROOT, check, check_eq, check_in, docker_available
+from helpers import REPO_ROOT, check, check_eq, check_in, docker_skip_reason
 
 from ctfctl import cli, util
 
@@ -35,10 +36,12 @@ SKIP_REASON = ""
 if not os.path.isdir(P1):
     SKIP = True
     SKIP_REASON = "fixtures/p1-flask-compose is missing"
-elif not docker_available():
-    SKIP = True
-    SKIP_REASON = ("docker is not available (daemon not running or CLI missing); the container "
-                   "integration test needs it, the rest of the suite does not")
+else:
+    docker_reason = docker_skip_reason(
+        "the container integration test", require_linux=True)
+    if docker_reason:
+        SKIP = True
+        SKIP_REASON = docker_reason
 
 _fixture_state: Dict[str, bool] = {}
 

@@ -15,7 +15,8 @@ What it deliberately does **not** prove, and `docs/validation.md` says so:
     network access this repository does not use by default;
   * anything about host firewalls or SSH reachability.
 
-The module skips with a clear reason when Docker is unavailable.
+The module skips with a clear reason when Docker is unavailable or is running
+Windows instead of Linux containers.
 """
 
 from __future__ import annotations
@@ -23,21 +24,21 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
 import tempfile
 from typing import Any, Dict, List, Tuple
 
-from helpers import REPO_ROOT, check, check_eq, check_in, docker_available
+from helpers import REPO_ROOT, check, check_eq, check_in, docker_skip_reason
 
 from ctfctl import util
 
 SKIP = False
 SKIP_REASON = ""
 
-if not docker_available():
+docker_reason = docker_skip_reason(
+    "the container lockdown/honeypot test", require_linux=True)
+if docker_reason:
     SKIP = True
-    SKIP_REASON = ("docker is not available (daemon not running or CLI missing); the container "
-                   "lockdown/honeypot test needs it, the rest of the suite does not")
+    SKIP_REASON = docker_reason
 
 IMAGE = "python:3.12-slim"
 
@@ -152,12 +153,8 @@ def _run(argv: List[str], timeout: float = 600.0) -> Tuple[int, str]:
 
 def _docker_available_for_run() -> bool:
     """Cheap guard so the module reports a skip instead of a docker error."""
-    try:
-        proc = subprocess.run(["docker", "info", "--format", "{{.ServerVersion}}"],
-                              capture_output=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return proc.returncode == 0
+    return docker_skip_reason("the container lockdown/honeypot test",
+                              require_linux=True) is None
 
 
 def test_lockdown_apply_verify_rollback_and_honeypot_in_a_container() -> None:
