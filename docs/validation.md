@@ -12,7 +12,7 @@ unseen organizer checker passes.
 | Operator OS (intended) | Arch Linux laptop (owner's machine); Linux-first, stdlib only |
 | SSH client | OpenSSH_for_Windows_9.5p2 |
 | Docker | Docker Desktop 29.7.2 engine; fixture images built locally; daemon not running for the 2026-09-17 local run (see not-run table) |
-| CI | GitHub-hosted runners (ubuntu-latest, windows-latest); workflow run 35191029558 |
+| CI | GitHub-hosted runners (ubuntu-latest, windows-latest); workflow run 35198144125 (current head `81d98f6`); earlier pre-normalization run 35191029558 |
 | Real SSH target | throwaway Alpine 3.20 container, sshd on 127.0.0.1:2222 (removed after the run) |
 | Network | The suite itself uses no network; the lab run used Docker image pulls and one SSH loopback connection |
 
@@ -22,17 +22,18 @@ unseen organizer checker passes.
 python tests/run_tests.py
 ```
 
-Result (2026-09-17, latest): **234 passed, 0 failed, 2 modules skipped**, exit
+Result (2026-09-17, latest): **236 passed, 0 failed, 2 modules skipped**, exit
 code 0, on Windows 11 with Python 3.14.7. No Docker daemon was running locally,
 so `t_integration_docker` and `t_integration_lockdown` skipped with a recorded
-reason (4 tests total); the historical ubuntu CI run exercised both (see
-"Continuous integration"). The module counts below sum to 238 with both
-Docker-backed modules included; 234 ran in the local run above.
+reason (4 tests total); the current ubuntu CI run exercised both (see
+"Continuous integration"). The module counts below sum to 240 with both
+Docker-backed modules included; the 4 tests inside the two skipped modules ran
+on ubuntu CI, and 236 ran in the local run above.
 
 | Module | Tests | What it proves |
 |---|---|---|
 | `t_engine` | 22 | Apply/rollback, stale plans, interrupted transactions, conflicting rollback, single-writer lock (including reclaiming a lock left by a dead process), failed syntax validation, functional regression -> automatic rollback, repeated apply, metadata preservation, line endings |
-| `t_remote` | 40 | Host injection refusal, ssh argv construction, bundle contents, fingerprint change, probe parsing (ss/netstat/proc), declaration gate before ssh, two-pass plan, policy gate, `--yes` gate, apply mirroring, install upload (fingerprint mismatch, force re-upload, failure handling), verify execution over the fake transport, recover end to end, human-output regressions for recover and rollback, flag absorption for `remote run`, read-only allowlist, unreachable-host message |
+| `t_remote` | 42 | Host injection refusal, ssh argv construction, bundle contents, deterministic bundle bytes (patched advancing clock; zeroed gzip MTIME header), fingerprint change, probe parsing (ss/netstat/proc), declaration gate before ssh, two-pass plan, policy gate, `--yes` gate, apply mirroring, install upload (fingerprint mismatch, force re-upload, failure handling), verify execution over the fake transport, recover end to end, human-output regressions for recover and rollback, flag absorption for `remote run`, read-only allowlist, unreachable-host message |
 | `t_remote_ops` | 14 | `remote auto` read-only default + report files + `--yes` gate + graceful degradation without python3; honeypot gates and argument forwarding; `collect` refusing unvalidated paths; lockdown reading the operator address from the ssh session; the access-recheck auto-rollback after an ssh/firewall change |
 | `t_lockdown` | 13 | Additive ruleset rendering, `/0` and operator-excluding allowlists refused, effect/rollback argv shape, nft effect allowlist, sshd `Match`/empty-config refusal, key-required validation, idempotent second render, review-only plan shape, verifier pruning, and the `file_create` apply/rollback/conflict paths |
 | `t_honeypot` | 7 | Busy/privileged/invalid ports refused, listener cap, HTTP lure logging with `decoy=true`, banner mode speaking first, per-port stop |
@@ -62,16 +63,22 @@ discover and plan. No non-loopback connection was attempted.
 
 `.github/workflows/tests.yml` runs `python tests/run_tests.py` on a matrix of
 ubuntu-latest and windows-latest with Python 3.9 and 3.x. Workflow run
-**35191029558** is all green on every job:
+**35198144125** (head `81d98f6`) is all green on every job:
+
+| Runner | Result | Notes |
+|---|---|---|
+| ubuntu-latest | 240 passed, 0 failed, 0 skipped | Docker available; both container modules ran (`t_integration_docker` 3 ok, `t_integration_lockdown` 1 ok) |
+| windows-latest | 236 passed, 0 failed, 2 modules skipped | The runner's Docker was in Windows-container mode; the fixture images need Linux containers |
+
+This is the first all-green run on the normalized history and covers the
+remote-test additions in the module table above, including the deterministic
+bundle tests. The earlier pre-normalization record, run **35191029558**, is kept
+for history:
 
 | Runner | Result | Notes |
 |---|---|---|
 | ubuntu-latest | 220 passed, 0 failed, 0 skipped | Docker available; both container modules ran |
 | windows-latest | 216 passed, 0 failed, 2 modules skipped | The runner's Docker was in Windows-container mode; the fixture images need Linux containers |
-
-This run is a historical record of the pre-normalization head; it predates the
-remote-test additions in the module table above, and no newer CI run is claimed
-here.
 
 Commit shas cited in this document predating 2026-09-17 refer to the
 pre-normalization history; the rewrite changed authorship only and every tree
@@ -157,19 +164,20 @@ python tools/package_release.py --rehearse --json
 python tools/package_release.py --check dist/ctf-buddy-0.2.0.tar.gz
 ```
 
-* Recorded rehearsal (2026-09-17, commit `69a4e0f`; later commits, including
-  this documentation update, contain only documentation changes): exit 0,
-  version 0.2.0, 219 files archived; `dist/ctf-buddy-0.2.0.tar.gz` is 618,104
-  bytes with sha256
-  `d0298bc76bdca98046c0aca0c81c863c4f8d7020799546987b8dd3faf7247aa8`, alongside
+* Recorded rehearsal (2026-09-17, head `81d98f6`; later commits, including this
+  documentation update, contain only documentation changes): exit 0, version
+  0.2.0, 219 files archived; `dist/ctf-buddy-0.2.0.tar.gz` is 619,491 bytes with
+  sha256
+  `126e19cf3096c7e025f6b196817628f5d22559ccd63942656b332748a362e0c1`, alongside
   `CHECKSUMS.sha256` (259 B), `MANIFEST.sha256` (23,105 B), `RELEASE-NOTES.md`
   (1,655 B) and `SOURCE-LICENSES.jsonl` (36,778 B, one record per source with
-  licence and reuse status). The earlier record (2026-09-16, commit `8f689e3`,
-  612,577 bytes, sha256
-  `df03917b71a49aa8300331140a2ee4ab1b47b39c29829971a45604bd337bee40`) is
-  superseded by this one.
+  licence and reuse status). This supersedes the two earlier records: the
+  2026-09-17 interim rehearsal (commit `69a4e0f`, 618,104 bytes, sha256
+  `d0298bc76bdca98046c0aca0c81c863c4f8d7020799546987b8dd3faf7247aa8`) and the
+  2026-09-16 record (commit `8f689e3`, 612,577 bytes, sha256
+  `df03917b71a49aa8300331140a2ee4ab1b47b39c29829971a45604bd337bee40`).
 * The rehearsal extracts the archive to a temporary directory and runs the full
-  suite from there. Inside the archived tree the suite gave 234 passed, 0
+  suite from there. Inside the archived tree the suite gave 236 passed, 0
   failed, 2 modules skipped. It ran on Windows with Python 3.14.7, so the
   Docker-backed integration modules were skipped locally, as in the suite run
   above.
@@ -185,7 +193,7 @@ python tools/package_release.py --check dist/ctf-buddy-0.2.0.tar.gz
 
 | Not run | Why | How to validate |
 |---|---|---|
-| Docker-backed integration modules on the local Windows host (2026-09-17 run) | No Docker daemon was running | Start Docker Desktop and run `python tests/run_tests.py integration_docker`; the ubuntu CI jobs ran both modules in run 35191029558 |
+| Docker-backed integration modules on the local Windows host (2026-09-17 run) | No Docker daemon was running | Start Docker Desktop and run `python tests/run_tests.py integration_docker`; the ubuntu CI jobs ran both modules in run 35198144125 |
 | The real event stack against real organizer rules | No event environment exists yet | `remote probe`, then `remote plan --verbose`; run the legitimate workflow and the profile's exploit probe before and after |
 | A real nftables load and its host effect | `nft` is stubbed in the container test (real packages need network), including the ubuntu CI run | On the declared host: `remote lockdown`, read the diff, then `nft list table inet ctfctl_lockdown` and a real reconnect check while the console is open |
 | A real `sshd -t`/`-T` run and a post-hardening reconnect | Same reason: `sshd` is stubbed in the container | On the declared host, after `--approve-review --yes`: open a *second* SSH session and re-run `sshd -T \| grep -i passwordauth` |

@@ -3,7 +3,33 @@
 Append-only. Newest entries at the top. One line per verified slice; details go
 in `docs/validation.md` and `docs/remote-mode.md`.
 
-## 2026-09-17 - 18 remote tests, recover/rollback output fixes, suite 234 passed, rehearsal re-run
+## 2026-09-17 (later) - deterministic bundle fix, all-green CI on normalized history, final rehearsal
+
+**Deterministic install bundle:** the remote install bundle could flake in CI
+(seen on windows py3.9) because the gzip wall-clock mtime made the bytes differ
+across a second boundary. `tools/ctfctl/remote.py` now wraps the bundle writer
+in an explicit `gzip.GzipFile(mtime=0)`. Two new `t_remote` tests pin byte
+determinism under a patched advancing clock and a zeroed gzip MTIME header
+(module now 42 tests).
+
+**Verification:** `python tests/run_tests.py` -> **236 passed, 0 failed, 2
+modules skipped** (`t_integration_docker`, `t_integration_lockdown`; no Docker
+daemon locally) on Windows 11 / Python 3.14.7.
+
+**CI:** workflow run 35198144125 on head `81d98f6` is all green: ubuntu jobs 240
+passed / 0 failed / 0 skipped (container and lockdown modules ran, 3 + 1 ok);
+windows jobs 236 passed / 0 failed / 2 module skips (Windows-container mode).
+First all-green run on the normalized history; supersedes run 35191029558.
+
+**Final release rehearsal:** `python tools/package_release.py --rehearse --json`
+at `81d98f6`, exit 0, version 0.2.0, 219 files archived; `dist/ctf-buddy-0.2.0.tar.gz`
+is 619,491 bytes, sha256
+`126e19cf3096c7e025f6b196817628f5d22559ccd63942656b332748a362e0c1`; suite inside
+the archive 236 passed / 0 failed / 2 skipped; `--check` verified OK (219 files);
+a second build of the same tree was byte-identical. Supersedes the `69a4e0f`
+rehearsal record (`d0298bc7...`) in the entry below.
+
+## 2026-09-17 (earlier) - 18 remote tests, recover/rollback output fixes, suite 234 passed, rehearsal re-run
 
 **Remote coverage:** `t_remote` grew by 18 tests (module now 40): remote install
 upload (fingerprint mismatch, force re-upload, failure handling), remote verify
@@ -27,15 +53,16 @@ the archived tree 234 passed / 0 failed / 2 skipped; `--check` verified OK (219
 files). Run at commit `69a4e0f`; later commits, including this docs update, are
 documentation only. Supersedes the 2026-09-16 rehearsal figures (612,577 bytes,
 sha256 `df03917b71a49aa8300331140a2ee4ab1b47b39c29829971a45604bd337bee40`)
-below.
+below. Superseded by the later 2026-09-17 rehearsal in the entry above.
 
-**CI status:** run 35191029558 remains the last recorded all-green run; it is a
-historical record of the pre-normalization head and does not cover the remote
-additions above. Repository history was normalized on 2026-09-17 (authorship
-only, byte-identical trees).
+**CI status (historical):** run 35191029558 is the pre-normalization all-green
+record; it does not cover the remote additions above and is superseded by run
+35198144125 in the entry above. Repository history was normalized on 2026-09-17
+(authorship only, byte-identical trees).
 
-**Operational status (pending):** the post-normalization update of the remote
-has not been pushed yet; the remote force-push is pending, not completed.
+**Operational status (resolved):** the authorship-normalization force-push
+landed; remote `master` carries the normalized history with all commits through
+`81d98f6` pushed. No remote update is outstanding.
 
 ## 2026-09-16 - local suite 216 passed, CI green, 0.2.0 release rehearsal
 
