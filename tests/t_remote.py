@@ -1,4 +1,4 @@
-"""Remote SSH layer: host validation, probe parsing, gating, bundle, plan flow.
+"""Remote SSH layer: validation, probe, gating, bundle, install, plan, verify, recover.
 
 No test here opens a socket. `SSH_RUNNER` is replaced with a fake that records
 argv and returns canned remote output, so command construction, parsing and
@@ -15,7 +15,7 @@ import os
 import shutil
 import tarfile
 from contextlib import redirect_stderr, redirect_stdout
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from helpers import Failure, REPO_ROOT, check, check_eq, check_in, temp_dir
 
@@ -58,6 +58,13 @@ def fake_ssh():
         yield fake
     finally:
         remote.SSH_RUNNER = original
+
+
+def _run_cli(argv: List[str]) -> Tuple[int, str, str]:
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        code = cli.main(argv)
+    return code, out.getvalue(), err.getvalue()
 
 
 @contextlib.contextmanager
@@ -646,3 +653,547 @@ def test_cli_targets_declare_round_trip() -> None:
         payload = json.loads(out.getvalue())
         check_eq(payload["host"], "box", "declare echoes the host")
         check_eq(payload["policy_acknowledged"], True, "policy ack recorded")
+
+
+# --------------------------------------------------------------------------
+# Install: skip, upload and forced re-upload branches
+# --------------------------------------------------------------------------
+def test_install_skips_the_upload_when_the_fingerprint_matches() -> None:
+    with remote_repo() as root:
+        fingerprint = remote.toolkit_fingerprint(root)
+        with fake_ssh() as fake:
+            _install_routes(fake, root)
+            payload = remote.install(remote.Conn(host="vulnbox"), root=root)
+        check_eq(payload["installed"], False, "a current toolkit must not re-upload")
+        check_eq(payload["reason"], "already current", "the skip must say why")
+        check_eq(
+            payload["fingerprint"], fingerprint, "the skip reports the local digest"
+        )
+        check_eq(len(fake.calls), 1, "the skip is exactly one version probe")
+        check_in(
+            "CTFCTL_VERSION",
+            fake.calls[0]["argv"][-1],
+            "the probe reads the remote version file",
+        )
+        check(
+            not [c for c in fake.calls if c["input"]],
+            "no bundle may be streamed when the toolkit is current",
+        )
+
+
+def test_install_streams_the_bundle_when_the_fingerprint_differs() -> None:
+    with remote_repo() as root:
+        fingerprint = remote.toolkit_fingerprint(root)
+        bundle = remote.build_bundle(root)
+        with fake_ssh() as fake:
+            fake.route("base64 -d | tar", 0, "")
+            fake.route('cat "$HOME/.ctfctl/CTFCTL_VERSION"', 0, "sha256:stale\n")
+            payload = remote.install(remote.Conn(host="vulnbox"), root=root)
+        check_eq(payload["installed"], True, "a stale remote toolkit must be replaced")
+        check_eq(
+            payload["fingerprint"], fingerprint, "the upload stamps the local digest"
+        )
+        check_eq(payload["bytes"], len(bundle), "the reported size is the bundle size")
+        check_eq(len(fake.calls), 2, "a mismatch is version probe then upload")
+        probe, upload = fake.calls
+        check_in(
+            "CTFCTL_VERSION", probe["argv"][-1], "the first call probes the version"
+        )
+        check_eq(probe["input"], None, "the probe streams nothing")
+        command = upload["argv"][-1]
+        check_in('mkdir -p "$HOME/.ctfctl"', command, "the upload must create the dir")
+        check_in("base64 -d | tar -xzf -", command, "the upload must pipe into tar")
+        check_in(fingerprint, command, "the upload must stamp the new fingerprint")
+        check(
+            base64.b64decode(upload["input"] or "") == bundle,
+            "the streamed input must be the exact toolkit bundle",
+        )
+
+
+def test_install_force_reuploads_a_matching_toolkit() -> None:
+    with remote_repo() as root:
+        with fake_ssh() as fake:
+            fake.route("base64 -d | tar", 0, "")
+            fake.route(
+                'cat "$HOME/.ctfctl/CTFCTL_VERSION"',
+                0,
+                remote.toolkit_fingerprint(root) + "\n",
+            )
+            payload = remote.install(remote.Conn(host="vulnbox"), root=root, force=True)
+        check_eq(payload["installed"], True, "--force must upload even when current")
+        check_eq(len(fake.calls), 2, "force is still version probe then upload")
+        uploads = [c for c in fake.calls if c["input"]]
+        check_eq(len(uploads), 1, "force must stream exactly one bundle")
+
+
+def test_install_upload_failure_is_reported_not_swallowed() -> None:
+    with remote_repo() as root:
+        with fake_ssh() as fake:
+            fake.route("base64 -d | tar", 1, "", "tar: Error opening archive\n")
+            fake.route('cat "$HOME/.ctfctl/CTFCTL_VERSION"', 0, "sha256:stale\n")
+            try:
+                remote.install(remote.Conn(host="vulnbox"), root=root)
+            except util.CtfError as exc:
+                check_in("vulnbox", str(exc), "the failing target must be named")
+                check_in("toolkit upload", str(exc), "the failure must name the upload")
+                check_in(
+                    "tar: Error opening archive",
+                    str(exc),
+                    "the remote stderr must survive into the error",
+                )
+            else:
+                raise Failure("an upload that fails must not report success")
+
+
+def test_cli_remote_install_reports_upload_and_current() -> None:
+    with remote_repo() as root:
+        with fake_ssh() as fake:
+            fake.route("base64 -d | tar", 0, "")
+            fake.route('cat "$HOME/.ctfctl/CTFCTL_VERSION"', 0, "sha256:stale\n")
+            code, out, _err = _run_cli(["remote", "install", "vulnbox", "--json"])
+        check_eq(code, 0, "installing must succeed")
+        payload = json.loads(out)
+        check_eq(payload["installed"], True, "the JSON must report the upload")
+        check(payload["bytes"] > 0, "the JSON must report the streamed size")
+        with fake_ssh() as second:
+            _install_routes(second, root)
+            code2, out2, _err2 = _run_cli(["remote", "install", "vulnbox"])
+        check_eq(code2, 0, "a current toolkit must still succeed")
+        check_in("is current", out2, "the human output must reflect the skip")
+        check(
+            not [c for c in second.calls if c["input"]],
+            "the CLI must not stream a bundle when the toolkit is current",
+        )
+
+
+# --------------------------------------------------------------------------
+# Verify: the saved plan's checks actually run over the fake transport
+# --------------------------------------------------------------------------
+def _save_plan_via_plan(root: str) -> None:
+    """Declare the host and pull a plan the way the CLI does, all faked."""
+    remote.declare_target("vulnbox", label="lab", ack_policy=True, root=root)
+    with fake_ssh() as fake:
+        _install_routes(fake, root)
+        fake.route("command -v python3", 0, "/usr/bin/python3\n")
+        fake.route("plan --json --no-save", 0, _plan_payload())
+        fake.route("ctfctl plan --json", 0, _plan_payload())
+        remote.plan(remote.Conn(host="vulnbox"), root=root)
+
+
+def test_verify_runs_the_saved_plan_checks_remotely() -> None:
+    with remote_repo() as root:
+        _save_plan_via_plan(root)
+        clean = json.dumps(
+            {
+                "plan": "sha256:abc",
+                "ok": True,
+                "results": [
+                    {
+                        "verifier": "http",
+                        "tier": "functional",
+                        "ok": True,
+                        "required": True,
+                        "detail": "200",
+                    }
+                ],
+            }
+        )
+        with fake_ssh() as fake:
+            _install_routes(fake, root)
+            fake.route("command -v python3", 0, "/usr/bin/python3\n")
+            fake.route("ctfctl verify", 0, clean)
+            code, payload = remote.verify(
+                remote.Conn(host="vulnbox"), "latest", root=root
+            )
+        check_eq(code, 0, "a clean verification must return 0")
+        check_eq(payload["ok"], True, "the remote JSON must pass through")
+        verify_calls = [c for c in fake.calls if "ctfctl verify" in c["argv"][-1]]
+        check_eq(len(verify_calls), 1, "verify must run exactly once")
+        command = verify_calls[0]["argv"][-1]
+        check_in(
+            "python3 -m ctfctl verify", command, "the remote engine must run verify"
+        )
+        check_in("sha256:abc", command, "the saved plan id must be forwarded")
+        check_in("--json", command, "verify must ask for machine output")
+        check("--no-functional" not in command, "functional checks default on")
+
+
+def test_verify_forwards_no_functional() -> None:
+    with remote_repo() as root:
+        _save_plan_via_plan(root)
+        clean = json.dumps({"plan": "sha256:abc", "ok": True, "results": []})
+        with fake_ssh() as fake:
+            _install_routes(fake, root)
+            fake.route("command -v python3", 0, "/usr/bin/python3\n")
+            fake.route("ctfctl verify", 0, clean)
+            code, payload = remote.verify(
+                remote.Conn(host="vulnbox"),
+                "sha256:abc",
+                root=root,
+                no_functional=True,
+            )
+        check_eq(code, 0, "skipping functional checks is a clean run")
+        check_eq(payload["ok"], True, "the payload must pass through")
+        verify_calls = [c for c in fake.calls if "ctfctl verify" in c["argv"][-1]]
+        check_in(
+            "--no-functional", verify_calls[0]["argv"][-1], "the flag must forward"
+        )
+
+
+def test_verify_preserves_a_failing_check() -> None:
+    with remote_repo() as root:
+        _save_plan_via_plan(root)
+        failing = json.dumps(
+            {
+                "plan": "sha256:abc",
+                "ok": False,
+                "results": [
+                    {
+                        "verifier": "http",
+                        "tier": "functional",
+                        "ok": False,
+                        "required": True,
+                        "detail": "connection refused",
+                    }
+                ],
+            }
+        )
+        with fake_ssh() as fake:
+            _install_routes(fake, root)
+            fake.route("command -v python3", 0, "/usr/bin/python3\n")
+            fake.route("ctfctl verify", 1, failing)
+            code, payload = remote.verify(
+                remote.Conn(host="vulnbox"), "latest", root=root
+            )
+        check_eq(code, 1, "a failing required check must keep the negative exit code")
+        check_eq(payload["ok"], False, "the failure must pass through, not be hidden")
+        check_eq(payload["results"][0]["ok"], False, "the failing verifier is reported")
+        check_in(
+            "connection refused",
+            payload["results"][0]["detail"],
+            "the verifier detail must survive",
+        )
+
+
+def test_verify_unparseable_failure_falls_back_to_stderr() -> None:
+    with remote_repo() as root:
+        _save_plan_via_plan(root)
+        with fake_ssh() as fake:
+            _install_routes(fake, root)
+            fake.route("command -v python3", 0, "/usr/bin/python3\n")
+            fake.route("ctfctl verify", 1, "not json at all", "the plan is stale\n")
+            code, payload = remote.verify(
+                remote.Conn(host="vulnbox"), "latest", root=root
+            )
+        check_eq(code, 1, "the client must not invent a pass")
+        check_eq(payload["ok"], False, "no JSON means the result is not ok")
+        check_in("stale", payload["stderr"], "stderr must survive into the payload")
+
+
+def test_cli_remote_verify_executes_and_returns_check_status() -> None:
+    with remote_repo() as root:
+        _save_plan_via_plan(root)
+        clean = json.dumps({"plan": "sha256:abc", "ok": True, "results": []})
+        with fake_ssh() as fake:
+            _install_routes(fake, root)
+            fake.route("command -v python3", 0, "/usr/bin/python3\n")
+            fake.route("ctfctl verify", 0, clean)
+            code, out, _err = _run_cli(["remote", "verify", "vulnbox", "--json"])
+        check_eq(code, 0, "a clean run through the CLI returns 0")
+        check_eq(json.loads(out)["ok"], True, "the CLI must emit the remote JSON")
+        failing = json.dumps(
+            {
+                "plan": "sha256:abc",
+                "ok": False,
+                "results": [
+                    {
+                        "verifier": "http",
+                        "tier": "functional",
+                        "ok": False,
+                        "required": True,
+                        "detail": "connection refused",
+                    }
+                ],
+            }
+        )
+        with fake_ssh() as second:
+            _install_routes(second, root)
+            second.route("command -v python3", 0, "/usr/bin/python3\n")
+            second.route("ctfctl verify", 1, failing)
+            code2, out2, _err2 = _run_cli(["remote", "verify", "vulnbox"])
+        check_eq(code2, 1, "a failing check must reach the operator as exit 1")
+        check_in(
+            "FAIL [functional] http: connection refused",
+            out2,
+            "the failing verifier must be shown",
+        )
+
+
+# --------------------------------------------------------------------------
+# Recover: parser wiring and the recovery flow over the fake transport
+# --------------------------------------------------------------------------
+RECOVER_COMMAND = (
+    'cd "$HOME/.ctfctl" && PYTHONPATH=tools python3 -m ctfctl recover --json'
+)
+
+
+def test_remote_recover_parser_and_help_are_wired() -> None:
+    args = cli.build_parser().parse_args(["remote", "recover", "vulnbox", "--json"])
+    check_eq(args.remote_command, "recover", "the subcommand must parse")
+    check_eq(args.host, "vulnbox", "the host must parse")
+    check_eq(args.json, True, "--json must be wired")
+    code, out, _err = _run_cli(["remote", "--help"])
+    check_eq(code, 0, "the remote command list must exit 0")
+    check_in("interrupted", out, "the listing must say what recover inspects")
+    code2, out2, _err2 = _run_cli(["remote", "recover", "--help"])
+    check_eq(code2, 0, "recover help must exit 0")
+    check_in("--json", out2, "recover's own help must document its flags")
+
+
+def test_recover_dispatches_recover_json_and_passes_findings() -> None:
+    with remote_repo() as root:
+        remote.declare_target("vulnbox", label="lab", root=root)
+        remote_payload = json.dumps(
+            {
+                "interrupted": [
+                    {
+                        "tx_id": "tx-9",
+                        "phase": "APPLYING",
+                        "journal_phases": ["APPLYING"],
+                        "requires": "manual review",
+                        "files": [],
+                    }
+                ]
+            }
+        )
+        with fake_ssh() as fake:
+            _install_routes(fake, root)
+            fake.route("command -v python3", 0, "/usr/bin/python3\n")
+            fake.route("ctfctl recover", 0, remote_payload)
+            code, payload = remote.recover(remote.Conn(host="vulnbox"), root=root)
+        check_eq(code, 0, "recovering findings is still a successful run")
+        check_eq(payload["interrupted"][0]["tx_id"], "tx-9", "findings pass through")
+        check_eq(
+            [c["argv"][-1] for c in fake.calls],
+            [
+                'cat "$HOME/.ctfctl/CTFCTL_VERSION" 2>/dev/null',
+                "command -v python3 2>/dev/null",
+                RECOVER_COMMAND,
+            ],
+            "recover must run after the toolkit and python3 prepare steps",
+        )
+
+
+def test_recover_nothing_to_recover_is_an_empty_finding_list() -> None:
+    with remote_repo() as root:
+        remote.declare_target("vulnbox", label="lab", root=root)
+        with fake_ssh() as fake:
+            _install_routes(fake, root)
+            fake.route("command -v python3", 0, "/usr/bin/python3\n")
+            fake.route("ctfctl recover", 0, json.dumps({"interrupted": []}))
+            code, payload = remote.recover(remote.Conn(host="vulnbox"), root=root)
+        # The remote engine reports "nothing to recover" as an empty finding
+        # list at exit 0; there is no separate no-lock negative state.
+        check_eq(code, 0, "nothing to recover is a clean run, not an error code")
+        check_eq(payload["interrupted"], [], "the empty state must stay empty")
+        recover_calls = [c for c in fake.calls if "ctfctl recover" in c["argv"][-1]]
+        check_eq(len(recover_calls), 1, "recover must still be asked exactly once")
+
+
+def test_cli_remote_recover_passes_machine_and_empty_output() -> None:
+    with remote_repo() as root:
+        remote.declare_target("vulnbox", label="lab", root=root)
+        populated = json.dumps(
+            {
+                "interrupted": [
+                    {
+                        "tx_id": "tx-9",
+                        "phase": "APPLYING",
+                        "requires": "manual review",
+                        "files": [],
+                    }
+                ]
+            }
+        )
+        with fake_ssh() as fake:
+            _install_routes(fake, root)
+            fake.route("command -v python3", 0, "/usr/bin/python3\n")
+            fake.route("ctfctl recover", 0, populated)
+            code, out, _err = _run_cli(["remote", "recover", "vulnbox", "--json"])
+        check_eq(code, 0, "the machine mode must succeed")
+        check_eq(
+            json.loads(out)["interrupted"][0]["tx_id"],
+            "tx-9",
+            "the machine output must carry the findings",
+        )
+        with fake_ssh() as second:
+            _install_routes(second, root)
+            second.route("command -v python3", 0, "/usr/bin/python3\n")
+            second.route("ctfctl recover", 0, json.dumps({"interrupted": []}))
+            code2, out2, _err2 = _run_cli(["remote", "recover", "vulnbox"])
+        check_eq(code2, 0, "the empty human run is a clean success")
+        check_in(
+            "no interrupted remote transactions",
+            out2,
+            "the empty human state must say so",
+        )
+
+
+def test_cli_remote_recover_renders_populated_findings() -> None:
+    with remote_repo() as root:
+        remote.declare_target("vulnbox", label="lab", root=root)
+        remote_payload = json.dumps(
+            {
+                "interrupted": [
+                    {
+                        "tx_id": "tx-9",
+                        "phase": "APPLYING",
+                        "journal_phases": ["PREPARED", "APPLYING"],
+                        "requires": "run `ctfctl rollback tx-9` after review",
+                        "files": [
+                            {
+                                "path": "/srv/app/main.py",
+                                "state": "post-image present",
+                                "action": "verify or roll back",
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+        with fake_ssh() as fake:
+            _install_routes(fake, root)
+            fake.route("command -v python3", 0, "/usr/bin/python3\n")
+            fake.route("ctfctl recover", 0, remote_payload)
+            code, out, _err = _run_cli(["remote", "recover", "vulnbox"])
+        check_eq(code, 0, "recovering findings is still a successful run")
+        check_in("tx-9  phase=APPLYING", out, "the transaction line must render")
+        check_in(
+            "  post-image present: /srv/app/main.py -> verify or roll back",
+            out,
+            "the per-file state and action must render",
+        )
+        check_in(
+            "  next: run `ctfctl rollback tx-9` after review",
+            out,
+            "the next step hint must render",
+        )
+        check(
+            "no interrupted remote transactions" not in out,
+            "a populated list must not render the empty state",
+        )
+
+
+def test_cli_remote_recover_empty_list_renders_empty_state() -> None:
+    with remote_repo() as root:
+        remote.declare_target("vulnbox", label="lab", root=root)
+        empty = json.dumps({"interrupted": []})
+        with fake_ssh() as fake:
+            _install_routes(fake, root)
+            fake.route("command -v python3", 0, "/usr/bin/python3\n")
+            fake.route("ctfctl recover", 0, empty)
+            code, out, _err = _run_cli(["remote", "recover", "vulnbox"])
+        check_eq(code, 0, "an empty recovery run is a clean success")
+        check_in(
+            "no interrupted remote transactions",
+            out,
+            "the empty state line must render when nothing was found",
+        )
+        with fake_ssh() as second:
+            _install_routes(second, root)
+            second.route("command -v python3", 0, "/usr/bin/python3\n")
+            second.route("ctfctl recover", 0, empty)
+            code2, out2, _err2 = _run_cli(["remote", "recover", "vulnbox", "--json"])
+        check_eq(code2, 0, "the empty machine run is a clean success")
+        check_eq(
+            json.loads(out2)["interrupted"],
+            [],
+            "--json must carry the empty finding list untouched",
+        )
+
+
+# --------------------------------------------------------------------------
+# Rollback: single-transaction and empty-list human rendering
+# --------------------------------------------------------------------------
+def test_cli_remote_rollback_renders_a_confirmed_transaction() -> None:
+    with remote_repo() as root:
+        remote.declare_target("vulnbox", label="lab", root=root)
+        rolled_back = json.dumps(
+            {
+                "tx_id": "tx-1",
+                "phase": "ROLLED_BACK",
+                "files": ["/srv/app/main.py"],
+                "restored": ["/srv/app/main.py"],
+                "effects": [],
+                "verification": [],
+                "errors": ["health check after rollback failed"],
+            }
+        )
+        with fake_ssh() as fake:
+            _install_routes(fake, root)
+            fake.route("command -v python3", 0, "/usr/bin/python3\n")
+            fake.route("ctfctl rollback", 0, rolled_back)
+            code, out, _err = _run_cli(
+                ["remote", "rollback", "vulnbox", "--tx", "tx-1", "--yes"]
+            )
+        check_eq(code, 0, "a clean rollback must return 0")
+        check_in(
+            "tx-1  phase=ROLLED_BACK  files=1",
+            out,
+            "a confirmed rollback must render as a transaction, not a list",
+        )
+        check_in("  restored /srv/app/main.py", out, "restored paths must render")
+        check_in(
+            "  ! health check after rollback failed",
+            out,
+            "engine errors must render",
+        )
+        check(
+            "no remote transactions recorded" not in out,
+            "a confirmed rollback must not render the empty state",
+        )
+        with fake_ssh() as second:
+            _install_routes(second, root)
+            second.route("command -v python3", 0, "/usr/bin/python3\n")
+            second.route("ctfctl rollback", 0, rolled_back)
+            code2, out2, _err2 = _run_cli(
+                ["remote", "rollback", "vulnbox", "--tx", "tx-1", "--yes", "--json"]
+            )
+        check_eq(code2, 0, "the machine rollback must succeed")
+        payload = json.loads(out2)
+        check_eq(payload["tx_id"], "tx-1", "--json must carry the raw payload")
+        check_eq(
+            payload["restored"],
+            ["/srv/app/main.py"],
+            "--json must stay untouched by the human renderer",
+        )
+
+
+def test_cli_remote_rollback_empty_list_renders_empty_state() -> None:
+    with remote_repo() as root:
+        remote.declare_target("vulnbox", label="lab", root=root)
+        empty = json.dumps({"transactions": []})
+        with fake_ssh() as fake:
+            _install_routes(fake, root)
+            fake.route("command -v python3", 0, "/usr/bin/python3\n")
+            fake.route("ctfctl rollback", 0, empty)
+            code, out, _err = _run_cli(["remote", "rollback", "vulnbox", "--list"])
+        check_eq(code, 0, "an empty rollback list is a clean run")
+        check_in(
+            "no remote transactions recorded",
+            out,
+            "the empty state line must render when there is no tx_id",
+        )
+        with fake_ssh() as second:
+            _install_routes(second, root)
+            second.route("command -v python3", 0, "/usr/bin/python3\n")
+            second.route("ctfctl rollback", 0, empty)
+            code2, out2, _err2 = _run_cli(
+                ["remote", "rollback", "vulnbox", "--list", "--json"]
+            )
+        check_eq(code2, 0, "the empty machine list must succeed")
+        check_eq(
+            json.loads(out2),
+            {"transactions": []},
+            "--json must carry the empty list untouched",
+        )
