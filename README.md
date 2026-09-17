@@ -3,7 +3,8 @@
 Offline-first preparation toolkit for a first-time CTF team. It does two jobs:
 
 1. **Find the answer fast.** A curated, source-linked knowledge base (123 cards
-   from 277 primary sources, 50 identifiable teams and maintainers) with ranked
+   from 100 canonical sources, 277 provenance records, 50 identifiable teams
+   and maintainers) with ranked
    full-text search, literal code search, nine copy-paste **cheat sheets**
    (`ctfctl kb cheat`) and a usable `rg`/Markdown fallback.
 2. **Operate on your vuln box by IP.** One command for the read-only pass
@@ -151,7 +152,7 @@ python drills/assets/make-synthetic-pcap.py captures/drill02.pcap --json
 
 # Package and rehearse a release from the archive itself.
 python tools/package_release.py --rehearse --json
-python tools/package_release.py --check dist/ctf-buddy-0.1.0.tar.gz
+python tools/package_release.py --check dist/ctf-buddy-0.2.0.tar.gz
 ```
 
 The optional flag-submission template is in `templates/competition-automation/`;

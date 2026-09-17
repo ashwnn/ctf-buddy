@@ -11,7 +11,8 @@ unseen organizer checker passes.
 | Operator OS (dev) | Windows 11 (10.0.26200), Python 3.14.7, SQLite 3.50.4 |
 | Operator OS (intended) | Arch Linux laptop (owner's machine); Linux-first, stdlib only |
 | SSH client | OpenSSH_for_Windows_9.5p2 |
-| Docker | Docker Desktop 29.7.2 engine; fixture images built locally |
+| Docker | Docker Desktop 29.7.2 engine; fixture images built locally; daemon not running for the 2026-09-16 local run (see not-run table) |
+| CI | GitHub-hosted runners (ubuntu-latest, windows-latest); workflow run 35191029558 |
 | Real SSH target | throwaway Alpine 3.20 container, sshd on 127.0.0.1:2222 (removed after the run) |
 | Network | The suite itself uses no network; the lab run used Docker image pulls and one SSH loopback connection |
 
@@ -21,9 +22,11 @@ unseen organizer checker passes.
 python tests/run_tests.py
 ```
 
-Result (2026-09-12, latest): **170 passed, 0 failed, 0 modules skipped, 101.6 s**,
-exit code 0. Docker was available, so both container modules ran instead of
-skipping.
+Result (2026-09-16, latest): **216 passed, 0 failed, 2 modules skipped**, exit
+code 0, on Windows 11 with Python 3.14.7. No Docker daemon was running locally,
+so `t_integration_docker` and `t_integration_lockdown` skipped with a recorded
+reason; the ubuntu CI jobs ran both (see "Continuous integration"). The module
+counts below sum to 220, the count exercised on ubuntu.
 
 | Module | Tests | What it proves |
 |---|---|---|
@@ -36,7 +39,11 @@ skipping.
 | `t_profiles` | 14 | Closed action registry, allowlisted argv, detection predicates, shipped profiles valid |
 | `t_safety` | 13 | Offline commands open no socket, no free-form command strings, inert rendering, no secrets in reports |
 | `t_decoy` | 11 | Rules gate, port safety, resource bounds, inert responses, lifecycle start/status/stop |
-| `t_kbindex` | 12 | Punctuation-safe FTS queries, deleted documents, missing FTS5 fallback, deterministic rebuild, operator-local text indexing |
+| `t_kbindex` | 13 | Punctuation-safe FTS queries, deleted documents, missing FTS5 fallback, deterministic rebuild, row-parity verify, cheatsheet tag listing, operator-local text indexing |
+| `t_kb_cli` | 15 | `kb show`, `kb open` and `kb export` at the CLI boundary: printed path for `$EDITOR`, export contents, no implicit browser launch |
+| `t_cli_plan_alias` | 14 | Documented `--plan` examples parse on the real CLI and resolve the right plan id (remote apply/verify, top-level apply); fake ssh runner, no sockets |
+| `t_integrate` | 12 | Corpus integration: merge skips, conflicts, problems report, idempotence, dry runs |
+| `t_watch` | 9 | Bounded `watch`/observe line and time budgets, dry-run capture plan, no socket or tcpdump start |
 | `t_files` | 10 | Depth/entry caps, absolute-path rules (POSIX paths verbatim on Windows), secret-name refusal, binary refusal, redaction, truncation |
 | `t_discover` | 9 | Non-root gaps, redaction, unknown listeners never become stack claims |
 | `t_template` | 7 | Submission allowlist, dry-run default, dedup, rate window, mock accept/reject over loopback |
@@ -49,6 +56,21 @@ skipping.
 `tests/t_safety.py::test_offline_commands_never_open_a_socket` monkeypatches
 `socket.connect`/`connect_ex`/`create_connection` and runs doctor, index, search,
 discover and plan. No non-loopback connection was attempted.
+
+## Continuous integration (GitHub-hosted, our check)
+
+`.github/workflows/tests.yml` runs `python tests/run_tests.py` on a matrix of
+ubuntu-latest and windows-latest with Python 3.9 and 3.x. Workflow run
+**35191029558** on head `68729c4` is all green on every job:
+
+| Runner | Result | Notes |
+|---|---|---|
+| ubuntu-latest | 220 passed, 0 failed, 0 skipped | Docker available; both container modules ran |
+| windows-latest | 216 passed, 0 failed, 2 modules skipped | The runner's Docker was in Windows-container mode; the fixture images need Linux containers |
+
+These are GitHub-hosted runners and the results are our checks. They do not
+prove that an organizer checker passes or that the event environment behaves
+the same.
 
 ## Container integration (Docker)
 
@@ -123,19 +145,22 @@ implemented by policy).
 
 ```bash
 python tools/package_release.py --rehearse --json
-python tools/package_release.py --check dist/ctf-buddy-0.1.0.tar.gz
+python tools/package_release.py --check dist/ctf-buddy-0.2.0.tar.gz
 ```
 
-* The builder assembles `dist/ctf-buddy-0.1.0.tar.gz` (195 files, ~520 KiB)
-  plus `MANIFEST.sha256`, `SOURCE-LICENSES.jsonl` (one record per source with
-  licence and reuse status) and `CHECKSUMS.sha256`.
+* Recorded rehearsal (2026-09-16, commit `68729c4`; commits after it contain
+  only documentation changes): exit 0, version 0.2.0, 219 files archived;
+  `dist/ctf-buddy-0.2.0.tar.gz` is 612,577 bytes with sha256
+  `df03917b71a49aa8300331140a2ee4ab1b47b39c29829971a45604bd337bee40`, alongside
+  `CHECKSUMS.sha256` (259 B), `MANIFEST.sha256` (23,105 B), `RELEASE-NOTES.md`
+  (1,655 B) and `SOURCE-LICENSES.jsonl` (36,778 B, one record per source with
+  licence and reuse status).
 * The rehearsal extracts the archive to a temporary directory and runs the full
-  suite from there. Recorded result: **132 passed, 0 failed, 0 modules skipped,
-  83.0 s** from `dist/ctf-buddy-0.1.0.tar.gz` (sha256
-  `927d6f4988190603248c41f32c142b3f3d5b52994a1c6c636fb29d337526fe40`, 200
-  files); see also `docs/progress.md`.
-* `--check` verifies every manifest hash against the archive and reports
-  unlisted files; tamper detection is covered by `t_release`.
+  suite from there. It ran on Windows with Python 3.14.7, so the Docker-backed
+  integration modules were skipped locally, as in the suite run above.
+* `--check` verified the archive against its manifest: OK, 219 files checked.
+  A second independent build of the same tree was byte-identical. Tamper
+  detection is covered by `t_release`.
 * The archive contains no binaries, no runtime state, no captures, no generated
   index and no local source snapshots. Determinism is covered by
   `t_release.test_release_is_deterministic` (`SOURCE_DATE_EPOCH` or the HEAD
@@ -145,10 +170,11 @@ python tools/package_release.py --check dist/ctf-buddy-0.1.0.tar.gz
 
 | Not run | Why | How to validate |
 |---|---|---|
+| Docker-backed integration modules on the local Windows host (2026-09-16 run) | No Docker daemon was running | Start Docker Desktop and run `python tests/run_tests.py integration_docker`; the ubuntu CI jobs already ran both modules |
 | The real event stack against real organizer rules | No event environment exists yet | `remote probe`, then `remote plan --verbose`; run the legitimate workflow and the profile's exploit probe before and after |
-| A real nftables load and its host effect | The container test stubs `nft` (real packages need network) | On the declared host: `remote lockdown`, read the diff, then `nft list table inet ctfctl_lockdown` and a real reconnect check while the console is open |
+| A real nftables load and its host effect | `nft` is stubbed in the container test (real packages need network), including the ubuntu CI run | On the declared host: `remote lockdown`, read the diff, then `nft list table inet ctfctl_lockdown` and a real reconnect check while the console is open |
 | A real `sshd -t`/`-T` run and a post-hardening reconnect | Same reason: `sshd` is stubbed in the container | On the declared host, after `--approve-review --yes`: open a *second* SSH session and re-run `sshd -T \| grep -i passwordauth` |
-| `remote honeypot` / `remote lockdown` over a real SSH session | Covered by the fake-transport tests only | Run both against a throwaway lab host before the event and record the result here |
+| `remote honeypot` / `remote lockdown` over a real SSH session | Fake-transport tests only; the stubbed container lockdown ran on ubuntu CI, but neither was exercised over real SSH | Run both against a throwaway lab host before the event and record the result here |
 | Honeypots under adversarial traffic | Only loopback requests were made | Start a listener once ticks begin and read `honeypot logs`/`collect` |
 | Privileged discovery completeness on the event host | Lab was a container, not the event VM | `discover` on the target as root vs unprivileged, compare gaps |
 | Windows host mutation | Unsupported by design | N/A |

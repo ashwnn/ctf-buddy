@@ -3,6 +3,37 @@
 Append-only. Newest entries at the top. One line per verified slice; details go
 in `docs/validation.md` and `docs/remote-mode.md`.
 
+## 2026-09-16 - local suite 216 passed, CI green, 0.2.0 release rehearsal
+
+**Verification:** `python tests/run_tests.py` -> **216 passed, 0 failed, 2
+modules skipped** on Windows 11 / Python 3.14.7. `t_integration_docker` and
+`t_integration_lockdown` skipped with a recorded reason (no Docker daemon
+locally). New modules since the 2026-09-12 record: `t_cli_plan_alias` (14),
+`t_integrate` (12), `t_kb_cli` (15), `t_watch` (9); `t_kbindex` is now 13.
+
+**CI added:** `.github/workflows/tests.yml` (ubuntu-latest + windows-latest x
+Python 3.9 + 3.x). Workflow run 35191029558 on head 68729c4 is all green:
+ubuntu jobs 220 passed / 0 failed / 0 skipped (Docker available, both container
+modules ran); windows jobs 216 passed / 0 failed / 2 modules skipped (the
+runner's Docker was in Windows-container mode; the fixtures need Linux
+containers). GitHub-hosted, our checks, not organizer validation.
+
+**Release rehearsal:** `python tools/package_release.py --rehearse --json`,
+exit 0, version 0.2.0, 219 files archived; `dist/ctf-buddy-0.2.0.tar.gz` is
+612,577 bytes, sha256
+`df03917b71a49aa8300331140a2ee4ab1b47b39c29829971a45604bd337bee40`;
+`CHECKSUMS.sha256` 259 B, `MANIFEST.sha256` 23,105 B, `RELEASE-NOTES.md` 1,655
+B, `SOURCE-LICENSES.jsonl` 36,778 B. `--check` verified OK (219 files) and a
+second independent build of the same tree was byte-identical. Run at commit
+68729c4 (later commits are documentation only), on Windows / Python 3.14.7, so
+the Docker-backed integration modules were skipped locally. This supersedes
+the 0.1.0 and 0.2.0 rehearsal figures below.
+
+**Source count corrected:** the three source manifests hold 277 records but
+only 100 distinct canonical sources (ids repeat across the manifest, the
+verified index and the fragment files). Earlier wording counted all 277
+records as primary sources; that was wrong.
+
 ## 2026-09-12 (final) — one-command recon, honeypots, gated lockdown, cheat sheets
 
 **`ctfctl remote auto <ip>` added.** One read-only pass over a declared host:
@@ -83,7 +114,8 @@ stubbed-container honesty), `docs/event-facts.md` (U15/U16), `docs/team-operatio
 `docs/card-template.md` (cheat-sheet adaptation), `README.md`. `doctor` now
 reports the cheat-sheet count and the honeypot/lockdown capability lines.
 
-**Release:** version bumped to 0.2.0; `python tools/package_release.py --json` built
+**Release (historical; superseded by the 2026-09-16 rehearsal entry):** version
+bumped to 0.2.0; `python tools/package_release.py --json` built
 `dist/ctf-buddy-0.2.0.tar.gz` (215 files, deterministic, sha256
 `c684582aef9ebb9db0f08c7cac2cd56f5be54afac02c1ab00a088fc61b74199b`), `--check`
 verified it against its manifest, and `--rehearse` extracted it and ran the whole
@@ -148,7 +180,8 @@ test.
 **Verification:** `python tests/run_tests.py` -> **132 passed, 0 failed, 0
 modules skipped** (83.2 s) with Docker available.
 
-**Release rehearsal:** `python tools/package_release.py --rehearse` built
+**Release rehearsal (historical, 0.1.0; superseded by the 2026-09-16
+rehearsal entry):** `python tools/package_release.py --rehearse` built
 `dist/ctf-buddy-0.1.0.tar.gz` (sha256
 `927d6f4988190603248c41f32c142b3f3d5b52994a1c6c636fb29d337526fe40`, 200 files)
 and ran the full suite from the extracted archive: **132 passed, 0 failed, 0
@@ -195,7 +228,8 @@ skipped (Docker unavailable). New modules: `t_remote.py` (21 tests),
 emergency restore), `docs/validation.md`.
 
 **Corpus/current inventory (from `ctfctl doctor`):** 114 cards in manifest,
-277 primary sources, 50 teams/organizers, 2 tested profiles, 2 fixtures.
+100 canonical sources (277 source records across the manifest, verified index
+and fragments), 50 teams/organizers, 2 tested profiles, 2 fixtures.
 
 ## Known gaps (next actions)
 
