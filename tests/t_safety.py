@@ -72,6 +72,7 @@ def run_cli(argv: List[str]) -> Tuple[int, str, str]:
 
 def test_offline_commands_never_open_a_socket() -> None:
     with repo_copy() as root:
+        previous = os.getcwd()
         os.chdir(root)
         try:
             with NetworkGuard() as guard:
@@ -84,9 +85,11 @@ def test_offline_commands_never_open_a_socket() -> None:
                 run_cli(["plan", "--no-save"])
             check(not guard.violations, f"unexpected network use: {guard.violations}")
         finally:
-            os.chdir(util.repo_root())
-            # The repository root contains the real index; the copy was separate,
-            # but the CWD change above must never leak into other tests.
+            # Restore the directory captured before the copy existed:
+            # util.repo_root() would resolve to the copy itself (it ships its own
+            # AGENTS.md), and the copy is deleted right after this block, leaving
+            # the process in a removed directory on POSIX.
+            os.chdir(previous)
 
 
 def test_doctor_json_is_well_formed_and_honest() -> None:

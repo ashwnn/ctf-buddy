@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import time
 from typing import Any, Dict
 
@@ -517,10 +518,21 @@ def test_live_lock_is_never_reclaimed() -> None:
             fh.write(f"pid={os.getpid()} at={util.iso_now()}\n")
         old = _time.time() - 3600
         os.utime(lock_path, (old, old))
+        # A pid-bearing lock file is only authoritative on the exclusive-create
+        # fallback: where flock exists, acquire() re-takes the file without ever
+        # reading it. Force the fallback so this rule is tested everywhere.
+        saved = sys.modules.get("fcntl")
+        sys.modules["fcntl"] = None  # type: ignore[assignment]
         try:
-            apply_mod.WriterLock(root).acquire()
-        except util.CtfError as exc:
-            check("lock" in str(exc), "the refusal must name the lock")
-        else:
-            apply_mod.WriterLock(root).release()
-            raise Failure("a lock held by a live process must never be reclaimed")
+            try:
+                apply_mod.WriterLock(root).acquire()
+            except util.CtfError as exc:
+                check("lock" in str(exc), "the refusal must name the lock")
+            else:
+                apply_mod.WriterLock(root).release()
+                raise Failure("a lock held by a live process must never be reclaimed")
+        finally:
+            if saved is None:
+                sys.modules.pop("fcntl", None)
+            else:
+                sys.modules["fcntl"] = saved

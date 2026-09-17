@@ -236,7 +236,11 @@ def test_apply_rolls_back_when_the_operator_cannot_reconnect() -> None:
             t_remote._install_routes(fake, root)
             fake.route("command -v python3", 0, "/usr/bin/python3\n")
             fake.route("ctfctl apply", 0, apply_json)
-            fake.route("BatchMode=yes", 255, "", "ssh: connect to host vulnbox: timed out")
+            # Match the reconnect probe by its remote command (`true`), never
+            # by `BatchMode=yes`: when stdin is not a tty (CI) the
+            # authorization upload above carries BatchMode=yes too and would
+            # hit this route.
+            fake.route("vulnbox true", 255, "", "ssh: connect to host vulnbox: timed out")
             fake.route("ctfctl rollback", 0, json.dumps({"tx_id": "tx-ssh", "phase": "ROLLED_BACK"}))
             code, payload = remote.apply(
                 remote.Conn(host="vulnbox"), "latest", yes=True, root=root
