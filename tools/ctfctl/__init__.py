@@ -21,6 +21,8 @@ __all__ = [
     "artifact",
     "challenge",
     "cli",
+    "crypto",
+    "decode",
     "decoy",
     "discover",
     "doctor",

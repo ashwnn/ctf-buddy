@@ -19,7 +19,9 @@ from . import (
     apply as apply_mod,
     artifact as artifact_mod,
     challenge as challenge_mod,
+    crypto as crypto_mod,
     decoy as decoy_mod,
+    decode as decode_mod,
     discover as discover_mod,
 )
 from . import doctor as doctor_mod, files as files_mod, honeypot as honeypot_mod
@@ -347,6 +349,124 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-seconds", type=float, default=artifact_mod.DEFAULT_MAX_SECONDS
     )
     a.add_argument("--json", action="store_true")
+    p.add_argument("--json", action="store_true")
+
+    # decode chains and classical-crypto triage (local, read-only)
+    p = sub.add_parser(
+        "decode",
+        help="bounded decode chains over a value or file (triage, not proof)",
+    )
+    p.add_argument("value", nargs="?", help="value to decode")
+    p.add_argument(
+        "--file",
+        dest="file_path",
+        metavar="PATH",
+        help="read the input from PATH instead (1 MiB cap, truncation reported)",
+    )
+    p.add_argument(
+        "--max-depth",
+        type=int,
+        default=decode_mod.DEFAULT_MAX_DEPTH,
+        help="max transforms per chain (default 4, cap 8)",
+    )
+    p.add_argument(
+        "--flag-regex",
+        default=decode_mod.DEFAULT_FLAG_REGEX,
+        help="flag pattern (ASCII); matches are leads, not proof",
+    )
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser(
+        "crypto",
+        help="classical-crypto candidates (heuristic; offline, no auto-solve)",
+    )
+    csub = p.add_subparsers(dest="crypto_command")
+
+    c = csub.add_parser(
+        "caesar", help="score all 26 shifts by English letter chi-squared"
+    )
+    c.add_argument("value", help="text to score")
+    c.add_argument(
+        "--top", type=int, default=crypto_mod.DEFAULT_TOP,
+        help="candidates to show (default 5)",
+    )
+    c.add_argument(
+        "--max-bytes", type=int, default=crypto_mod.DEFAULT_MAX_BYTES,
+        help="input cap in bytes (default 16384, hard cap 262144)",
+    )
+    c.add_argument(
+        "--flag-regex", default=crypto_mod.DEFAULT_FLAG_REGEX,
+        help="flag pattern (ASCII); matches are leads, not proof",
+    )
+    c.add_argument("--json", action="store_true")
+
+    c = csub.add_parser(
+        "xor-single",
+        help="score all 256 single-byte XOR keys (printable ratio + chi-squared)",
+    )
+    c.add_argument("hex_value", help="ciphertext as hex")
+    c.add_argument(
+        "--top", type=int, default=crypto_mod.DEFAULT_TOP,
+        help="candidates to show (default 5)",
+    )
+    c.add_argument(
+        "--max-bytes", type=int, default=crypto_mod.DEFAULT_MAX_BYTES,
+        help="input cap in bytes (default 16384, hard cap 262144)",
+    )
+    c.add_argument(
+        "--flag-regex", default=crypto_mod.DEFAULT_FLAG_REGEX,
+        help="flag pattern (ASCII); matches are leads, not proof",
+    )
+    c.add_argument("--json", action="store_true")
+
+    c = csub.add_parser(
+        "xor-crib",
+        help="slide a known crib across hex ciphertext at a constant key",
+    )
+    c.add_argument("hex_value", help="ciphertext as hex")
+    c.add_argument("--known", required=True, help="known plaintext crib (<= 256 bytes)")
+    c.add_argument(
+        "--all",
+        action="store_true",
+        dest="all_offsets",
+        help="show every offset (deduplicated, capped at 2048 rows)",
+    )
+    c.add_argument(
+        "--top", type=int, default=crypto_mod.DEFAULT_TOP,
+        help="candidates to show without --all (default 5)",
+    )
+    c.add_argument(
+        "--max-bytes", type=int, default=crypto_mod.DEFAULT_MAX_BYTES,
+        help="input cap in bytes (default 16384, hard cap 262144)",
+    )
+    c.add_argument(
+        "--flag-regex", default=crypto_mod.DEFAULT_FLAG_REGEX,
+        help="flag pattern (ASCII); matches are leads, not proof",
+    )
+    c.add_argument("--json", action="store_true")
+
+    c = csub.add_parser(
+        "vigenere",
+        help="recover key-length and key candidates (IC + per-column chi-squared)",
+    )
+    c.add_argument("value", help="text to analyze")
+    c.add_argument(
+        "--top", type=int, default=crypto_mod.DEFAULT_TOP,
+        help="candidates to show (default 5)",
+    )
+    c.add_argument(
+        "--max-key-len", type=int, default=crypto_mod.DEFAULT_MAX_KEY_LEN,
+        help="key length cap (default 20, hard cap 64)",
+    )
+    c.add_argument(
+        "--max-bytes", type=int, default=crypto_mod.DEFAULT_MAX_BYTES,
+        help="input cap in bytes (default 16384, hard cap 262144)",
+    )
+    c.add_argument(
+        "--flag-regex", default=crypto_mod.DEFAULT_FLAG_REGEX,
+        help="flag pattern (ASCII); matches are leads, not proof",
+    )
+    c.add_argument("--json", action="store_true")
     p.add_argument("--json", action="store_true")
 
     # challenge workspaces
@@ -1213,6 +1333,67 @@ def cmd_artifact(args: argparse.Namespace) -> int:
     raise util.UsageError(f"unknown artifact action {command!r}")
 
 
+def cmd_decode(args: argparse.Namespace) -> int:
+    payload = decode_mod.decode(
+        args.value,
+        args.file_path,
+        max_depth=args.max_depth,
+        flag_regex=args.flag_regex,
+    )
+    if args.json:
+        util.emit_json(payload)
+    else:
+        print(decode_mod.render_decode(payload))
+    return util.EXIT_OK
+
+
+def cmd_crypto(args: argparse.Namespace) -> int:
+    command = args.crypto_command
+    if not command:
+        raise util.UsageError(
+            "crypto needs a subcommand",
+            hint="try: ctfctl crypto caesar <value>",
+        )
+    if command == "caesar":
+        payload = crypto_mod.caesar(
+            args.value,
+            top=args.top,
+            max_bytes=args.max_bytes,
+            flag_regex=args.flag_regex,
+        )
+    elif command == "xor-single":
+        payload = crypto_mod.xor_single(
+            args.hex_value,
+            top=args.top,
+            max_bytes=args.max_bytes,
+            flag_regex=args.flag_regex,
+        )
+    elif command == "xor-crib":
+        payload = crypto_mod.xor_crib(
+            args.hex_value,
+            args.known,
+            top=args.top,
+            all_offsets=args.all_offsets,
+            max_bytes=args.max_bytes,
+            flag_regex=args.flag_regex,
+        )
+    elif command == "vigenere":
+        payload = crypto_mod.vigenere(
+            args.value,
+            top=args.top,
+            max_key_len=args.max_key_len,
+            max_bytes=args.max_bytes,
+            flag_regex=args.flag_regex,
+        )
+    else:
+        raise util.UsageError(f"unknown crypto subcommand {command!r}")
+    if args.json:
+        util.emit_json(payload)
+    else:
+        print(crypto_mod.render_crypto(payload))
+    return util.EXIT_OK
+
+
 def cmd_challenge(args: argparse.Namespace) -> int:
     command = args.challenge_command
     if not command:
@@ -2011,6 +2192,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         "files": cmd_files,
         "artifact": cmd_artifact,
         "challenge": cmd_challenge,
+        "crypto": cmd_crypto,
+        "decode": cmd_decode,
         "remote": cmd_remote,
     }
     handler = handlers[args.command]
