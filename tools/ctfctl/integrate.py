@@ -14,9 +14,24 @@ derive `sha256(canonical_url)`. This module is the single integration pass:
      one identity no matter which placeholder spelling a worker used;
   3. rewrite every `src-...` reference in card text and card manifests;
   4. optionally re-verify each URL over the network (explicit, online-only);
-  5. write sources/manifest.jsonl + kb/manifest.jsonl and a merge report.
+  5. merge the staged card manifests into kb/manifest.jsonl and report.
 
-It is idempotent: running it twice produces the same output.
+Card merge (`merge_cards`): kb/manifest.jsonl is the live corpus and the merge
+baseline; kb/manifest.<worker>.jsonl files are staged imports.
+
+  * a staged record whose normalised fields equal the baseline record for the
+    same card_id is skipped;
+  * a staged record with the same card_id but any differing field is a
+    conflict: the report names each field with the baseline and fragment
+    values, and the baseline record is kept;
+  * a staged card_id absent from the baseline is added.
+
+The card merge is idempotent: skipped and conflicting records never change the
+baseline, so a second pass over an unchanged tree adds nothing and reports no
+conflict. `run` is a dry run unless `write=True`; `main` writes only with
+`--write`. Writes are limited to kb/ (reference rewrites plus the merged
+kb/manifest.jsonl); sources/manifest.jsonl is replaced only for programmatic
+callers that pass `write=True, write_sources=True`.
 """
 
 from __future__ import annotations
@@ -140,35 +155,105 @@ def merge_source_records(records: Sequence[Dict[str, Any]], mapping: Dict[str, s
     return records_out, quarantined
 
 
-def merge_cards(root: str) -> Tuple[List[Dict[str, Any]], List[str]]:
-    problems: List[str] = []
-    merged: Dict[str, Dict[str, Any]] = {}
-    order: List[str] = []
-    for name in sorted(os.listdir(os.path.join(root, "kb"))):
-        if not name.startswith("manifest.") or not name.endswith(".jsonl"):
+LIVE_MANIFEST = "manifest.jsonl"
+
+
+def _normalise_card(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Copy a manifest record with the defaults and path spelling used in kb/."""
+    out = dict(record)
+    out.setdefault("content_origin", "original-summary")
+    out.setdefault("evidence_status", "source-supported but untested")
+    out["path"] = str(out.get("path", "")).replace(os.sep, "/")
+    return out
+
+
+def _card_field_diff(existing: Dict[str, Any],
+                     candidate: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Field-level differences between a baseline and a staged card record."""
+    diff: Dict[str, Dict[str, Any]] = {}
+    for key in sorted(set(existing) | set(candidate)):
+        if key == "card_id":
             continue
-        path = os.path.join(root, "kb", name)
-        for record in util.load_jsonl(path):
-            card_id = record.get("card_id")
+        if existing.get(key) != candidate.get(key):
+            diff[key] = {"existing": existing.get(key), "fragment": candidate.get(key)}
+    return diff
+
+
+def merge_cards(root: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Merge staged fragment manifests into the live kb/manifest.jsonl.
+
+    kb/manifest.jsonl is the merge baseline, not an input fragment. Returns
+    the merged records plus a report with keys ``merged`` (count), ``added``
+    (card ids taken from fragments), ``skipped`` (identical to the baseline),
+    ``conflicts`` (same card_id, differing fields; baseline kept) and
+    ``problems``. Never writes; `run` writes the returned records.
+    """
+    problems: List[str] = []
+    added: List[str] = []
+    skipped: List[str] = []
+    conflicts: List[Dict[str, Any]] = []
+    merged: Dict[str, Dict[str, Any]] = {}
+    origin: Dict[str, str] = {}
+    order: List[str] = []
+    kb_dir = os.path.join(root, "kb")
+    names = [LIVE_MANIFEST] + sorted(
+        name for name in os.listdir(kb_dir)
+        if name != LIVE_MANIFEST and name.startswith("manifest.") and name.endswith(".jsonl")
+    )
+    for name in names:
+        path = os.path.join(kb_dir, name)
+        if not os.path.isfile(path):
+            continue
+        seen = set()
+        for raw in util.load_jsonl(path):
+            card_id = raw.get("card_id")
             if not card_id:
                 problems.append(f"{name}: record without card_id")
                 continue
-            if card_id in merged:
+            if card_id in seen:
                 problems.append(f"duplicate card_id {card_id} in {name}")
                 continue
-            record.setdefault("content_origin", "original-summary")
-            record.setdefault("evidence_status", "source-supported but untested")
-            record["path"] = str(record.get("path", "")).replace(os.sep, "/")
-            if not os.path.isfile(os.path.join(root, record["path"])):
+            seen.add(card_id)
+            record = _normalise_card(raw)
+            file_missing = not os.path.isfile(os.path.join(root, record["path"]))
+            existing = merged.get(card_id)
+            if existing is None:
+                if file_missing:
+                    problems.append(f"{card_id}: file missing: {record['path']}")
+                    if name != LIVE_MANIFEST:
+                        continue
+                merged[card_id] = record
+                origin[card_id] = name
+                order.append(card_id)
+                if name != LIVE_MANIFEST:
+                    added.append(card_id)
+            elif file_missing:
                 problems.append(f"{card_id}: file missing: {record['path']}")
-                continue
-            merged[card_id] = record
-            order.append(card_id)
-    return [merged[c] for c in order], problems
+            elif existing == record:
+                skipped.append(card_id)
+            else:
+                conflicts.append({
+                    "card_id": card_id,
+                    "fragment": name,
+                    "existing_source": origin[card_id],
+                    "fields": _card_field_diff(existing, record),
+                })
+    report = {
+        "merged": len(order),
+        "added": added,
+        "skipped": skipped,
+        "conflicts": conflicts,
+        "problems": problems,
+    }
+    return [merged[c] for c in order], report
 
 
-def rewrite_references(root: str, mapping: Dict[str, str]) -> Dict[str, int]:
-    """Rewrite placeholder source ids to canonical ids in cards and manifests."""
+def rewrite_references(root: str, mapping: Dict[str, str],
+                       *, write: bool = True) -> Dict[str, int]:
+    """Rewrite placeholder source ids to canonical ids in cards and manifests.
+
+    Every replacement is counted; disk is only touched when ``write`` is true.
+    """
     changed_files = 0
     changed_tokens = 0
     targets: List[str] = []
@@ -191,22 +276,29 @@ def rewrite_references(root: str, mapping: Dict[str, str]) -> Dict[str, int]:
 
         new_text = CARD_REF.sub(repl, text)
         if replaced:
-            util.write_text_atomic(path, new_text)
+            if write:
+                util.write_text_atomic(path, new_text)
             changed_files += 1
             changed_tokens += replaced
     return {"files": changed_files, "tokens": changed_tokens}
 
 
-def run(root: Optional[str] = None, *, online: bool = True,
-        check_cards: bool = True) -> Dict[str, Any]:
+def run(root: Optional[str] = None, *, online: bool = True, check_cards: bool = True,
+        write: bool = False, write_sources: bool = False) -> Dict[str, Any]:
+    """Compute the integration report; nothing is written unless ``write``.
+
+    A write pass canonicalises references under kb/ and replaces
+    kb/manifest.jsonl. sources/manifest.jsonl is replaced only when
+    ``write_sources`` is set too (programmatic use; main() never does).
+    """
     root = root or util.repo_root()
     fragments, references = gather_source_records(root)
     mapping = build_mapping(fragments, references)
     records, quarantined = merge_source_records(fragments + references, mapping, online=online)
     # Cards must be rewritten before their manifests are merged so that
     # source_ids in the manifest are canonical.
-    rewrite_stats = rewrite_references(root, mapping)
-    cards, card_problems = merge_cards(root)
+    rewrite_stats = rewrite_references(root, mapping, write=write)
+    cards, card_report = merge_cards(root)
     missing_refs = []
     known = {record["source_id"] for record in records}
     for card in cards:
@@ -214,13 +306,16 @@ def run(root: Optional[str] = None, *, online: bool = True,
             if sid not in known:
                 missing_refs.append(f"{card['card_id']} -> {sid}")
 
-    util.write_text_atomic(os.path.join(root, "sources", "manifest.jsonl"),
-                           util.dump_jsonl(sorted(records, key=lambda r: r["source_id"])))
-    util.write_text_atomic(os.path.join(root, "kb", "manifest.jsonl"),
-                           util.dump_jsonl(sorted(cards, key=lambda r: r["card_id"])))
+    if write:
+        if write_sources:
+            util.write_text_atomic(os.path.join(root, "sources", "manifest.jsonl"),
+                                   util.dump_jsonl(sorted(records, key=lambda r: r["source_id"])))
+        util.write_text_atomic(os.path.join(root, "kb", "manifest.jsonl"),
+                               util.dump_jsonl(sorted(cards, key=lambda r: r["card_id"])))
 
     report = {
         "generated_at": util.iso_now(),
+        "write": write,
         "sources": {
             "fragment_records": len(fragments),
             "reference_records": len(references),
@@ -237,9 +332,8 @@ def run(root: Optional[str] = None, *, online: bool = True,
             "teams": len({r.get("team") for r in records if r.get("team")}),
         },
         "cards": {
-            "merged": len(cards),
+            **card_report,
             "unresolved_source_refs": missing_refs,
-            "problems": card_problems,
         },
         "rewrites": rewrite_stats,
     }
@@ -250,6 +344,8 @@ def run(root: Optional[str] = None, *, online: bool = True,
 
 def render(report: Dict[str, Any]) -> str:
     lines = ["corpus integration report", ""]
+    if not report.get("write", False):
+        lines.append("(dry run: nothing written; pass --write to apply)")
     src = report["sources"]
     lines.append(f"sources   {src['canonical_records']} canonical "
                  f"(from {src['fragment_records']} fragment + {src['reference_records']} "
@@ -262,7 +358,12 @@ def render(report: Dict[str, Any]) -> str:
         lines.append(f"            QUARANTINED {item['source_id']}: {item['error']} ({item['url']})")
     cards = report["cards"]
     lines.append("")
-    lines.append(f"cards     {cards['merged']} merged")
+    lines.append(f"cards     {cards['merged']} merged, "
+                 f"{len(cards['added'])} added, {len(cards['skipped'])} unchanged")
+    for conflict in cards["conflicts"][:10]:
+        fields = ", ".join(sorted(conflict["fields"]))
+        lines.append(f"            CONFLICT {conflict['card_id']} from "
+                     f"{conflict['fragment']} (kept {conflict['existing_source']}): {fields}")
     if cards["problems"]:
         for problem in cards["problems"][:10]:
             lines.append(f"            PROBLEM {problem}")
@@ -287,17 +388,21 @@ def render(report: Dict[str, Any]) -> str:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="merge corpus fragments into the manifests")
+    parser = argparse.ArgumentParser(
+        description="merge corpus fragments into the manifests (dry run by default)")
     parser.add_argument("--offline", action="store_true",
                         help="skip URL re-verification (no network access)")
+    parser.add_argument("--write", action="store_true",
+                        help="apply the merge; without it nothing is written")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
-    report = run(online=not args.offline)
+    report = run(online=not args.offline, write=args.write)
     if args.json:
         util.emit_json(report)
     else:
         print(render(report))
-    problems = report["cards"]["problems"] or report["cards"]["unresolved_source_refs"]
+    cards = report["cards"]
+    problems = cards["problems"] or cards["conflicts"] or cards["unresolved_source_refs"]
     return util.EXIT_OK if not problems else util.EXIT_NEGATIVE
 
 
