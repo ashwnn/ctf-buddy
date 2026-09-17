@@ -18,6 +18,7 @@ Modules:
 
 __all__ = [
     "apply",
+    "artifact",
     "challenge",
     "cli",
     "decoy",

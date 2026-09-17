@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 from . import (
     __version__,
     apply as apply_mod,
+    artifact as artifact_mod,
     challenge as challenge_mod,
     decoy as decoy_mod,
     discover as discover_mod,
@@ -222,8 +223,12 @@ def build_parser() -> argparse.ArgumentParser:
     k = kb_sub.add_parser(
         "cheat", help="quick-reference cards (no query lists them all)"
     )
-    k.add_argument("topic", nargs="?", default="",
-                   help="topic to match, e.g. 'web', 'pcap', 'lockdown'")
+    k.add_argument(
+        "topic",
+        nargs="?",
+        default="",
+        help="topic to match, e.g. 'web', 'pcap', 'lockdown'",
+    )
     k.add_argument("--limit", type=int, default=20)
     k.add_argument("--json", action="store_true")
 
@@ -314,6 +319,34 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument("--limit", type=int, default=files_mod.DEFAULT_LIMIT)
     f.add_argument("--max-depth", type=int, default=files_mod.MAX_DEPTH)
     f.add_argument("--json", action="store_true")
+    p.add_argument("--json", action="store_true")
+
+    # artifact triage (local, read-only)
+    p = sub.add_parser("artifact", help="bounded read-only artifact triage")
+    asub = p.add_subparsers(dest="artifact_command")
+    a = asub.add_parser("scan", help="hash, strings, flags, decode and archive members")
+    a.add_argument("path")
+    a.add_argument(
+        "--flag-regex",
+        default=artifact_mod.DEFAULT_FLAG_REGEX,
+        help=(
+            "flag pattern (ASCII); it runs over arbitrary input, so avoid "
+            "nested quantifiers (ReDoS): keep the pattern linear"
+        ),
+    )
+    a.add_argument("--max-depth", type=int, default=artifact_mod.DEFAULT_MAX_DEPTH)
+    a.add_argument("--max-entries", type=int, default=artifact_mod.DEFAULT_MAX_ENTRIES)
+    a.add_argument("--max-members", type=int, default=artifact_mod.DEFAULT_MAX_MEMBERS)
+    a.add_argument(
+        "--max-member-mib", type=int, default=artifact_mod.DEFAULT_MAX_MEMBER_MIB
+    )
+    a.add_argument(
+        "--max-total-mib", type=int, default=artifact_mod.DEFAULT_MAX_TOTAL_MIB
+    )
+    a.add_argument(
+        "--max-seconds", type=float, default=artifact_mod.DEFAULT_MAX_SECONDS
+    )
+    a.add_argument("--json", action="store_true")
     p.add_argument("--json", action="store_true")
 
     # challenge workspaces
@@ -520,8 +553,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="extra TCP port to keep reachable (repeatable)",
     )
-    r.add_argument("--allow-udp-ports", default="", help="comma-separated UDP ports to keep")
-    r.add_argument("--log-drops", action="store_true", help="log dropped packets (rate limited)")
+    r.add_argument(
+        "--allow-udp-ports", default="", help="comma-separated UDP ports to keep"
+    )
+    r.add_argument(
+        "--log-drops", action="store_true", help="log dropped packets (rate limited)"
+    )
     r.add_argument("--no-firewall", action="store_true")
     r.add_argument("--no-ssh", action="store_true")
     r.add_argument("--sshd-port", type=int, default=22)
@@ -536,7 +573,9 @@ def build_parser() -> argparse.ArgumentParser:
     h.add_argument("--mode", choices=["http", "banner"], default="http")
     h.add_argument("--bind", default="0.0.0.0")
     h.add_argument("--banner", default="", help="custom text or a preset name")
-    h.add_argument("--path", action="append", default=[], help="HTTP lure path (repeatable)")
+    h.add_argument(
+        "--path", action="append", default=[], help="HTTP lure path (repeatable)"
+    )
     h.add_argument("--allow-privileged", action="store_true")
     h.add_argument("--json", action="store_true")
     h = honeypot_sub.add_parser("status")
@@ -557,10 +596,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     lockdown_sub = p.add_subparsers(dest="lockdown_command")
     lock = lockdown_sub.add_parser("plan", help="build the lockdown plan")
-    lock.add_argument("--operator-cidr", required=True,
-                      help="your own address; it is always added to the allowlist")
+    lock.add_argument(
+        "--operator-cidr",
+        required=True,
+        help="your own address; it is always added to the allowlist",
+    )
     lock.add_argument("--allow-cidr", action="append", default=[])
-    lock.add_argument("--allow-ports", default="", help="comma-separated TCP ports to keep")
+    lock.add_argument(
+        "--allow-ports", default="", help="comma-separated TCP ports to keep"
+    )
     lock.add_argument("--allow-udp-ports", default="")
     lock.add_argument("--no-firewall", action="store_true")
     lock.add_argument("--no-ssh", action="store_true")
@@ -572,11 +616,17 @@ def build_parser() -> argparse.ArgumentParser:
     lock.add_argument("--nft-path", default="/etc/ctfctl-lockdown.nft")
     lock.add_argument("--table", default="ctfctl_lockdown")
     lock.add_argument("--note", default="")
-    lock.add_argument("--inventory", help="inventory JSON to plan against (default: discover now)")
+    lock.add_argument(
+        "--inventory", help="inventory JSON to plan against (default: discover now)"
+    )
     lock.add_argument("--no-save", action="store_true")
     lock.add_argument("--verbose", action="store_true")
-    lock.add_argument("--allow-fixture", action="store_true", default=False,
-                       help="allow fixture-local authorization (drills only)")
+    lock.add_argument(
+        "--allow-fixture",
+        action="store_true",
+        default=False,
+        help="allow fixture-local authorization (drills only)",
+    )
     lock.add_argument("--json", action="store_true")
 
     return parser
@@ -923,9 +973,13 @@ def cmd_decoy(args: argparse.Namespace) -> int:
             )
         return util.EXIT_OK
     if command == "start":
-        state = decoy_mod.start(util.repo_root(), port=args.port, bind=args.bind,
-                                mode=getattr(args, "mode", "http"),
-                                banner=getattr(args, "banner", ""))
+        state = decoy_mod.start(
+            util.repo_root(),
+            port=args.port,
+            bind=args.bind,
+            mode=getattr(args, "mode", "http"),
+            banner=getattr(args, "banner", ""),
+        )
         if args.json:
             util.emit_json(state)
         else:
@@ -958,14 +1012,21 @@ def cmd_honeypot(args: argparse.Namespace) -> int:
     root = util.repo_root()
     if command == "start":
         entry = honeypot_mod.start(
-            root, port=args.port, mode=args.mode, bind=args.bind, banner=args.banner,
-            paths=list(args.path) or None, allow_privileged=args.allow_privileged,
+            root,
+            port=args.port,
+            mode=args.mode,
+            bind=args.bind,
+            banner=args.banner,
+            paths=list(args.path) or None,
+            allow_privileged=args.allow_privileged,
         )
         if args.json:
             util.emit_json(entry)
         else:
-            print(f"honeypot listening on {entry['bind']}:{entry['port']} "
-                  f"mode={entry['mode']} pid={entry['pid']}")
+            print(
+                f"honeypot listening on {entry['bind']}:{entry['port']} "
+                f"mode={entry['mode']} pid={entry['pid']}"
+            )
             print(f"events -> {entry['log_path']}  (every event carries decoy=true)")
             print("It must never sit on a port a scored service or the checker uses.")
         return util.EXIT_OK
@@ -979,7 +1040,9 @@ def cmd_honeypot(args: argparse.Namespace) -> int:
     if command == "stop":
         if not args.port and not args.all_listeners:
             raise util.UsageError("honeypot stop needs --port <PORT> or --all")
-        payload = honeypot_mod.stop(root, port=args.port, all_listeners=args.all_listeners)
+        payload = honeypot_mod.stop(
+            root, port=args.port, all_listeners=args.all_listeners
+        )
         if args.json:
             util.emit_json(payload)
         else:
@@ -987,8 +1050,10 @@ def cmd_honeypot(args: argparse.Namespace) -> int:
             if not stopped:
                 print("no honeypot listener matched that selection")
             for entry in stopped:
-                print(f"stopped port {entry.get('port')} "
-                      f"(process gone: {not entry.get('alive_after')})")
+                print(
+                    f"stopped port {entry.get('port')} "
+                    f"(process gone: {not entry.get('alive_after')})"
+                )
         return util.EXIT_OK
     payload = honeypot_mod.status(root)
     if args.json:
@@ -1006,10 +1071,16 @@ def cmd_lockdown(args: argparse.Namespace) -> int:
     spec = plan_mod.LockdownSpec(
         operator_cidr=args.operator_cidr,
         allow_cidrs=list(args.allow_cidr),
-        allow_tcp_ports=[int(p) for p in str(args.allow_ports).replace(";", ",").split(",")
-                         if p.strip()],
-        allow_udp_ports=[int(p) for p in str(args.allow_udp_ports).replace(";", ",").split(",")
-                         if p.strip()],
+        allow_tcp_ports=[
+            int(p)
+            for p in str(args.allow_ports).replace(";", ",").split(",")
+            if p.strip()
+        ],
+        allow_udp_ports=[
+            int(p)
+            for p in str(args.allow_udp_ports).replace(";", ",").split(",")
+            if p.strip()
+        ],
         include_firewall=not args.no_firewall,
         include_ssh=not args.no_ssh,
         log_drops=args.log_drops,
@@ -1114,6 +1185,32 @@ def cmd_files(args: argparse.Namespace) -> int:
             print(files_mod.render_matches(payload))
         return util.EXIT_OK
     raise util.UsageError(f"unknown files action {command!r}")
+
+
+def cmd_artifact(args: argparse.Namespace) -> int:
+    command = args.artifact_command
+    if not command:
+        raise util.UsageError(
+            "artifact needs a subcommand",
+            hint="try: ctfctl artifact scan <file-or-directory>",
+        )
+    if command == "scan":
+        payload = artifact_mod.scan(
+            args.path,
+            flag_regex=args.flag_regex,
+            max_depth=args.max_depth,
+            max_entries=args.max_entries,
+            max_members=args.max_members,
+            max_member_bytes=args.max_member_mib * artifact_mod.MIB,
+            max_total_bytes=args.max_total_mib * artifact_mod.MIB,
+            max_seconds=args.max_seconds,
+        )
+        if args.json:
+            util.emit_json(payload)
+        else:
+            print(artifact_mod.render_scan(payload))
+        return util.EXIT_OK
+    raise util.UsageError(f"unknown artifact action {command!r}")
 
 
 def cmd_challenge(args: argparse.Namespace) -> int:
@@ -1370,16 +1467,25 @@ def cmd_remote(args: argparse.Namespace) -> int:
                 util.emit_json(payload)
             else:
                 if not payload.get("collected"):
-                    print(f"nothing collected from {conn.target} "
-                          f"({payload.get('error') or 'no honeypot logs'})")
+                    print(
+                        f"nothing collected from {conn.target} "
+                        f"({payload.get('error') or 'no honeypot logs'})"
+                    )
                 for item in payload.get("collected", []):
-                    print(f"port {item.get('port'):>5}  {item.get('bytes', 0):>8} bytes  "
-                          f"-> {item.get('saved_to') or item.get('error')}")
+                    print(
+                        f"port {item.get('port'):>5}  {item.get('bytes', 0):>8} bytes  "
+                        f"-> {item.get('saved_to') or item.get('error')}"
+                    )
             return util.EXIT_OK if payload.get("ok") else util.EXIT_NEGATIVE
         code, payload = remote_mod.honeypot(
-            conn, args.honeypot_action, port=args.honeypot_port, mode=args.mode,
+            conn,
+            args.honeypot_action,
+            port=args.honeypot_port,
+            mode=args.mode,
             bind=args.bind,
-            banner=args.banner, lines=args.lines, all_listeners=args.all_listeners,
+            banner=args.banner,
+            lines=args.lines,
+            all_listeners=args.all_listeners,
             yes=args.yes,
         )
         if args.json:
@@ -1390,14 +1496,20 @@ def cmd_remote(args: argparse.Namespace) -> int:
             print(util.printable(remote_mod.render_honeypot_logs(payload), 8000))
         elif args.honeypot_action == "start":
             if payload.get("port"):
-                print(f"honeypot on {conn.target}: port {payload['port']} "
-                      f"mode={payload.get('mode')} log={payload.get('log_path')}")
-                print("Collect the events with: ctfctl remote honeypot "
-                      f"{conn.target} collect")
+                print(
+                    f"honeypot on {conn.target}: port {payload['port']} "
+                    f"mode={payload.get('mode')} log={payload.get('log_path')}"
+                )
+                print(
+                    "Collect the events with: ctfctl remote honeypot "
+                    f"{conn.target} collect"
+                )
             else:
                 print(f"honeypot did not start: {util.printable(str(payload), 400)}")
         else:
-            print(f"stopped: {util.printable(str(payload.get('stopped') or payload), 400)}")
+            print(
+                f"stopped: {util.printable(str(payload.get('stopped') or payload), 400)}"
+            )
         return code
     if command == "lockdown":
         payload = remote_mod.lockdown(
@@ -1405,15 +1517,19 @@ def cmd_remote(args: argparse.Namespace) -> int:
             operator_cidr=args.operator_cidr,
             allow_cidrs=list(args.allow_cidr),
             allow_ports=list(args.allow_port),
-            allow_udp_ports=[int(p) for p in str(args.allow_udp_ports).replace(";", ",")
-                             .split(",") if p.strip()],
+            allow_udp_ports=[
+                int(p)
+                for p in str(args.allow_udp_ports).replace(";", ",").split(",")
+                if p.strip()
+            ],
             include_firewall=not args.no_firewall,
             include_ssh=not args.no_ssh,
             log_drops=args.log_drops,
             sshd_port=args.sshd_port,
         )
         matched = [
-            entry for entry in (payload.get("plans") or [])
+            entry
+            for entry in (payload.get("plans") or [])
             if (entry.get("detection") or {}).get("matched")
         ]
         if args.json:
@@ -1460,9 +1576,13 @@ def cmd_remote(args: argparse.Namespace) -> int:
             print(f"\nsaved: {payload['report_json']}")
             print(f"       {payload['report_markdown']}")
         failed = [
-            key for key, code_key in (("apply", "apply_exit_code"),
-                                      ("honeypot", "honeypot_exit_code"))
-            if key in (payload.get("steps") or {}) and payload.get(code_key) not in (None, 0)
+            key
+            for key, code_key in (
+                ("apply", "apply_exit_code"),
+                ("honeypot", "honeypot_exit_code"),
+            )
+            if key in (payload.get("steps") or {})
+            and payload.get(code_key) not in (None, 0)
         ]
         return util.EXIT_NEGATIVE if failed or payload.get("gaps") else util.EXIT_OK
     raise util.UsageError(f"unknown remote subcommand {command!r}")
@@ -1533,9 +1653,13 @@ def cmd_kb(args: argparse.Namespace) -> int:
         return _emit_hits(hits, args.json)
     if command == "cheat":
         try:
-            hits = kbindex.search(
-                args.topic, mode="auto", tag="cheatsheet", limit=args.limit
-            ) if args.topic else kbindex.by_tag("cheatsheet", limit=args.limit)
+            hits = (
+                kbindex.search(
+                    args.topic, mode="auto", tag="cheatsheet", limit=args.limit
+                )
+                if args.topic
+                else kbindex.by_tag("cheatsheet", limit=args.limit)
+            )
         except util.CtfError as exc:
             if args.json:
                 util.emit_json({"error": str(exc), "hint": exc.hint, "hits": []})
@@ -1557,7 +1681,9 @@ def cmd_kb(args: argparse.Namespace) -> int:
                 if hit.snippet:
                     print(f"  {util.printable(hit.snippet, 200)}")
             if hits:
-                print("\nfull text: ctfctl kb show <id>   everything: ctfctl kb search <terms>")
+                print(
+                    "\nfull text: ctfctl kb show <id>   everything: ctfctl kb search <terms>"
+                )
         return util.EXIT_OK if hits else util.EXIT_NEGATIVE
     if command == "literal":
         hits = kbindex.literal(
@@ -1883,6 +2009,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         "prep-online": cmd_prep_online,
         "targets": cmd_targets,
         "files": cmd_files,
+        "artifact": cmd_artifact,
         "challenge": cmd_challenge,
         "remote": cmd_remote,
     }
