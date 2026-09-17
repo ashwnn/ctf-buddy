@@ -7,7 +7,7 @@ local source snapshots and anything secret-looking. No binaries are bundled.
 
     python tools/package_release.py                 # build into dist/
     python tools/package_release.py --json          # machine summary
-    python tools/package_release.py --check dist/ctf-buddy-0.1.0.tar.gz
+    python tools/package_release.py --check dist/ctf-buddy-<version>.tar.gz
     python tools/package_release.py --rehearse      # build, extract, run tests
 
 Outputs, next to the archive:
