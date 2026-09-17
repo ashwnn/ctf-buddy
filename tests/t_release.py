@@ -69,6 +69,7 @@ def test_release_excludes_state_captures_index_and_snapshots() -> None:
             or "/state/" in name
             or "/captures/" in name
             or "/index/" in name
+            or "/work/" in name
             or "/sources/raw/" in name
             or "sources/text/private" in name
             or name.endswith((".pcap", ".pcapng", ".key", ".pem", ".sqlite3"))
@@ -83,6 +84,7 @@ def test_release_refuses_a_seeded_secret_file() -> None:
         os.makedirs(os.path.join(root, "sources", "raw"))
         os.makedirs(os.path.join(root, "sources", "local"))
         os.makedirs(os.path.join(root, "state"))
+        os.makedirs(os.path.join(root, "work", "seeded-challenge"))
         with open(os.path.join(root, "README.md"), "w", encoding="utf-8") as fh:
             fh.write("mini root\n")
         with open(os.path.join(root, "AGENTS.md"), "w", encoding="utf-8") as fh:
@@ -97,11 +99,21 @@ def test_release_refuses_a_seeded_secret_file() -> None:
             os.path.join(root, "state", "targets.json"), "w", encoding="utf-8"
         ) as fh:
             fh.write("{}")
+        with open(
+            os.path.join(root, "work", "seeded-challenge", "flags.txt"),
+            "w",
+            encoding="utf-8",
+        ) as fh:
+            fh.write("flag{seeded}\n")
         with temp_dir() as out:
             summary = build_release(out, root=root)
             names = list(_members(summary["archive"]))
             check_eq(
-                [n for n in names if "raw" in n or "state" in n or "local" in n],
+                [
+                    n
+                    for n in names
+                    if "raw" in n or "state" in n or "local" in n or "work/" in n
+                ],
                 [],
                 "seeded runtime files must never be packaged",
             )
@@ -184,3 +196,9 @@ def test_source_licenses_mirror_the_manifest() -> None:
             "redistribution",
         ):
             check_in(field, sample, "licence records need the reuse fields")
+
+
+def test_gitignore_ignores_the_work_workspace_root() -> None:
+    with open(os.path.join(REPO_ROOT, ".gitignore"), encoding="utf-8") as handle:
+        lines = [line.strip() for line in handle]
+    check_in("work/", lines, ".gitignore must ignore the per-challenge workspace root")
