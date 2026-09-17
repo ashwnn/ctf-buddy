@@ -1614,6 +1614,11 @@ def _export(args: argparse.Namespace) -> int:
 
     root = util.repo_root()
     destination = os.path.abspath(args.directory)
+    if os.path.isfile(destination):
+        raise util.CtfError(
+            f"refusing to export into an existing file: {destination}",
+            hint="choose a new directory",
+        )
     if os.path.exists(destination) and os.listdir(destination):
         raise util.CtfError(
             f"refusing to export into a non-empty directory: {destination}",
