@@ -3,6 +3,40 @@
 Append-only. Newest entries at the top. One line per verified slice; details go
 in `docs/validation.md` and `docs/remote-mode.md`.
 
+## 2026-09-17 - 18 remote tests, recover/rollback output fixes, suite 234 passed, rehearsal re-run
+
+**Remote coverage:** `t_remote` grew by 18 tests (module now 40): remote install
+upload (fingerprint mismatch, force re-upload, failure handling), remote verify
+execution through the fake transport, remote recover end to end, and
+human-output regressions for recover and rollback.
+
+**Output fixes:** in `tools/ctfctl/cli.py`, `recover` and `rollback` printed the
+empty-state line even when a real payload existed (`--json` output was always
+correct); both fixed with the regression tests above. One version-agnostic
+docstring example fixed in `tools/package_release.py`.
+
+**Verification:** `python tests/run_tests.py` -> **234 passed, 0 failed, 2
+modules skipped** (`t_integration_docker`, `t_integration_lockdown`; no Docker
+daemon locally) on Windows 11 / Python 3.14.7.
+
+**Release rehearsal re-run:** `python tools/package_release.py --rehearse
+--json`, exit 0, version 0.2.0, 219 files archived; `dist/ctf-buddy-0.2.0.tar.gz`
+is 618,104 bytes, sha256
+`d0298bc76bdca98046c0aca0c81c863c4f8d7020799546987b8dd3faf7247aa8`; suite inside
+the archived tree 234 passed / 0 failed / 2 skipped; `--check` verified OK (219
+files). Run at commit `69a4e0f`; later commits, including this docs update, are
+documentation only. Supersedes the 2026-09-16 rehearsal figures (612,577 bytes,
+sha256 `df03917b71a49aa8300331140a2ee4ab1b47b39c29829971a45604bd337bee40`)
+below.
+
+**CI status:** run 35191029558 remains the last recorded all-green run; it is a
+historical record of the pre-normalization head and does not cover the remote
+additions above. Repository history was normalized on 2026-09-17 (authorship
+only, byte-identical trees).
+
+**Operational status (pending):** the post-normalization update of the remote
+has not been pushed yet; the remote force-push is pending, not completed.
+
 ## 2026-09-16 - local suite 216 passed, CI green, 0.2.0 release rehearsal
 
 **Verification:** `python tests/run_tests.py` -> **216 passed, 0 failed, 2
