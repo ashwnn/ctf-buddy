@@ -1,6 +1,6 @@
 # ctf-buddy
 
-Offline-first preparation toolkit for a first-time CTF team. It does two jobs:
+Offline-first preparation toolkit for a first-time CTF team. [Reuse it across events](docs/reuse-across-events.md) by recording each event's rules in a small profile; the attack/defend features below apply only where the rules and target scope allow them. It does two jobs:
 
 1. **Find the answer fast.** A curated, source-linked knowledge base (123 cards
    from 100 canonical sources, 277 provenance records, 50 identifiable teams
